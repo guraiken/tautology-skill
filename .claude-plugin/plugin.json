@@ -1,0 +1,16 @@
+{
+  "name": "tautology",
+  "version": "1.0.0",
+  "description": "Hunts tautology in UI copy, tests, code and the agent's answers, and copied code sequences to extract by the codebase's architecture. Runs before each answer through a Stop hook.",
+  "keywords": [
+    "tautology",
+    "ux-writing",
+    "tests",
+    "refactoring",
+    "hooks"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "guraiken"
+  }
+}

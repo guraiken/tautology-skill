@@ -1,0 +1,16 @@
+{
+  "name": "tautology-skill",
+  "owner": {
+    "name": "guraiken"
+  },
+  "plugins": [
+    {
+      "name": "tautology",
+      "source": "./",
+      "description": "Tautology hunt and copied-code search before each answer."
+    }
+  ],
+  "metadata": {
+    "description": "Tautology hunt and copied-code search for Claude Code."
+  }
+}
