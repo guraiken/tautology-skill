@@ -1,0 +1,480 @@
+"""Hunts code that should be one piece: the same call chain in several files and the same copied
+block. Says where to extract it, by the codebase's architecture.
+
+    python patterns.py a.rs b.rs                         # patterns that touch these files
+    python patterns.py --all                             # the whole repository
+    python patterns.py --accept "<finding>" --reason "<why>"
+    python patterns.py --selftest                        # cases/ vs cases/expected.txt, and the hook
+
+Calling the same function in many places is reuse, not a defect. The defect is the same sequence
+copied: it becomes one function in the right layer, and each place calls it.
+Project settings: .claude/modular/architecture.md (the destination map) and .claude/modular/accepted.txt.
+"""
+import argparse
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CASES = HERE / "cases"
+sys.path.insert(0, str(HERE.parent / "tautology"))
+import core  # noqa: E402  (the tautology skill: findings, accepted findings, test-file detection)
+from core import Finding  # noqa: E402
+
+ACCEPTED_FILE = core.REPO / ".claude" / "modular" / "accepted.txt"
+MAP_FILE = Path(".claude") / "modular" / "architecture.md"
+
+CODE = {".rs", ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte"}
+SKIP = {"target", "node_modules", "dist", "build", ".venv", "__pycache__", "fixtures", "vendor", ".git"}
+MIN_CALLS = 4      # chain: calls in a row
+MIN_COUNT = 4      # chain: times in total
+MIN_FILES = 3      # chain: different files
+MIN_BLOCK = 6      # block: equal non-blank lines
+PER_ROUND = 3      # patterns per hook round
+# Framework idiom: chains of only these methods, with trivial arguments, are the normal way to write.
+COMMON = {"flex", "flex_1", "flex_col", "flex_row", "flex_none", "flex_shrink_0", "flex_grow", "min_w_0", "min_h_0",
+          "w_full", "h_full", "size_full", "items_center", "items_start", "items_end", "justify_center",
+          "justify_between", "justify_end", "justify_start", "gap", "gap_1", "gap_2", "gap_3", "gap_4", "id",
+          "overflow_hidden", "overflow_y_scroll", "overflow_x_scroll", "relative", "absolute", "w", "h",
+          "into_iter", "iter", "iter_mut", "map", "collect", "cloned", "copied", "flatten", "filter", "rev",
+          "unwrap", "unwrap_or_default", "clone", "to_owned", "to_string", "into", "as_ref", "trim", "len"}
+# Calls that carry content, not style: they cut the chain, and the argument is scanned on its own.
+BREAKERS = {"child", "children", "on_click", "on_mouse_down", "on_mouse_up", "on_hover", "when", "when_some",
+            "with_animation", "on_action", "tooltip", "hint", "map", "and_then_some"}
+TRIVIAL_ARG = re.compile(r'^$|^"S"$|^-?[\d_.]+$|^px\(-?[\d_.]+\)$|^\w+\.\w+$|^\w+$')
+UI = re.compile(r"\bpx\(|\b(div|h_flex|v_flex)\(\)|\.child\(|\.text_\w+\(|\.bg\(|\.border\w*\(|\.rounded\w*\(|"
+                r"\bcx\b|\bWindow\b|\bgpui::|className=|<\w+[\s>]|\bstyle=")
+# Style methods (GPUI, Tailwind-like): a chain of only these is a visual piece, even without px() or a colour.
+STYLE = re.compile(r"\.(absolute|relative|top_\w+|left_\w+|right_\w+|bottom_\w+|inset_\w+|size_\w+|rounded\w*|"
+                   r"border\w*|bg|shadow\w*|opacity|cursor_\w+|text_\w+|font_\w+|line_height|flex\w*|items_\w+|"
+                   r"justify_\w+|gap\w*|p[xytblr]?|m[xytblr]?|w_\w+|h_\w+|overflow_\w+)\(")
+COMPONENT = re.compile(r"(^|/)(components?|screens?|views?|pages?|widgets?|ui)/|\.(tsx|jsx|vue|svelte)$")
+
+
+# ----------------------------------------------------------------------------- architecture
+class Architecture:
+    """Destination map: .claude/modular/architecture.md of the repository. Without it, looks for a description."""
+
+    def __init__(self, repo):
+        self.repo, self.layers, self.destinations, self.outside = Path(repo), [], {}, []
+        self.components, self.common, self.verify, self.source = [], set(COMMON), "", ""
+        self.file = self.repo / MAP_FILE
+        self.docs = []
+        if self.file.is_file():
+            self._read(self.file.read_text(encoding="utf-8"))
+        else:
+            self.docs = described_architecture(self.repo)
+
+    def _read(self, text):
+        for raw in text.splitlines():
+            m = re.match(r"^\s*([\w ]+?)\s*:\s*(.*)$", raw)
+            if not m or raw.lstrip().startswith("#"):
+                continue
+            key, value = m.group(1).strip().lower(), m.group(2).strip()
+            layer = re.fullmatch(r"layer (\d+)", key)
+            target = re.fullmatch(r"target (\d+)", key)
+            if layer:
+                self.layers += [(prefix, int(layer.group(1))) for prefix in value.split()]
+            elif target:
+                self.destinations[int(target.group(1))] = value
+            elif key == "exclude":
+                self.outside += value.split()
+            elif key == "components":
+                self.components += value.split()
+            elif key == "idioms":
+                self.common |= set(value.split())
+            elif key == "verify":
+                self.verify = value
+            elif key == "source":
+                self.source = value
+        self.layers.sort(key=lambda item: -len(item[0]))  # the longest prefix decides
+
+    @property
+    def defined(self):
+        return bool(self.destinations)
+
+    def layer(self, rel):
+        return next((n for prefix, n in self.layers if rel == prefix or rel.startswith(prefix)), None)
+
+    def excluded(self, rel):
+        return any(rel.startswith(prefix) for prefix in self.outside)
+
+    def is_component(self, rel):
+        return any(rel.startswith(p) for p in self.components) or bool(COMPONENT.search(rel))
+
+
+def described_architecture(repo):
+    """Documents that describe the architecture: ARCHITECTURE.md in any folder, or a section in AGENTS/CLAUDE/README."""
+    found = []
+    for rel in tracked(repo):
+        name = Path(rel).name.lower()
+        if name in ("architecture.md", "arquitetura.md"):
+            found.append(rel)
+        elif name in ("agents.md", "claude.md", "readme.md") and "/" not in rel:
+            text = (Path(repo) / rel).read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?im)^#+ .*(architecture|arquitetura|layers?|camadas?)\b", text):
+                found.append(rel)
+    return found
+
+
+def tracked(repo):
+    """The repository's files (git, without the ignored ones); outside a git root, every file in the folder."""
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    if not top or Path(top).resolve() != Path(repo).resolve():
+        return [p.relative_to(repo).as_posix() for p in Path(repo).rglob("*") if p.is_file()]
+    out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=repo, capture_output=True,
+                         text=True, encoding="utf-8", errors="replace").stdout
+    return [l for l in out.splitlines() if l]
+
+
+# ------------------------------------------------------------------------------- index
+def code_files(repo, arch, suffixes=None):
+    for rel in tracked(repo):
+        path = Path(rel)
+        if path.suffix not in (suffixes or CODE) or SKIP & set(path.parts) or arch.excluded(rel):
+            continue
+        if re.search(r"(^|/)\.claude/skills/[^/]+/cases/", rel) and not core.SELFTEST:
+            continue
+        if core.is_test(rel):
+            continue
+        yield rel
+
+
+def production(text, suffix):
+    """Production code: Rust's test module stays out (it repeats on purpose)."""
+    if suffix == ".rs":
+        m = re.search(r"(?m)^\s*#\[cfg\(test\)\]", text)
+        if m:
+            return text[:m.start()]
+    return text
+
+
+ARGS = r"\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)"
+CHAIN = re.compile(r"(?:\s*\.\s*[A-Za-z_]\w*\s*" + ARGS + r"){" + str(MIN_CALLS) + r",}")
+CALL = re.compile(r"\.\s*([A-Za-z_]\w*)\s*(" + ARGS + r")")
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"|\x60[^\x60]*\x60')
+
+
+def blank_strings(text):
+    return STRING.sub(lambda m: '"S"' + "\n" * m.group(0).count("\n"), text)
+
+
+class Index:
+    def __init__(self, repo, arch, suffixes=None):
+        self.repo, self.arch = Path(repo), arch
+        self.chains = []   # (rel, line, [(name, args)])
+        self.end = {}      # (rel, line) -> last line of the piece
+        self.lines = {}    # rel -> [(line, normalized)]
+        for rel in code_files(repo, arch, suffixes):
+            path = self.repo / rel
+            try:
+                if path.stat().st_size > 1_500_000:
+                    continue
+                text = production(path.read_text(encoding="utf-8", errors="replace"), path.suffix)
+            except OSError:
+                continue
+            flat = blank_strings(text)
+            self.collect(rel, flat, flat, 0)
+            self.lines[rel] = normalized_lines(flat)
+
+    def collect(self, rel, flat, text, offset, depth=0):
+        """Chains of the text; content (.child, .on_click...) cuts the chain and is scanned inside."""
+        if depth > 6:
+            return
+        for m in CHAIN.finditer(text):
+            segment = []
+            for call in CALL.finditer(m.group(0)):
+                name, args = call.group(1), call.group(2)
+                start = offset + m.start() + call.start()
+                if name in BREAKERS:
+                    self.keep(rel, flat, segment)
+                    segment = []
+                    self.collect(rel, flat, args[1:-1], offset + m.start() + call.start(2) + 1, depth + 1)
+                else:
+                    segment.append((name, re.sub(r"\s+", "", args[1:-1]), start))
+            self.keep(rel, flat, segment)
+
+    def keep(self, rel, flat, segment):
+        trimmed = segment  # routine layout at the edges is not part of the piece, if a chain remains
+        while trimmed and common_chain([trimmed[0][:2]], self.arch):
+            trimmed = trimmed[1:]
+        while trimmed and common_chain([trimmed[-1][:2]], self.arch):
+            trimmed = trimmed[:-1]
+        segment = trimmed if len(trimmed) >= MIN_CALLS else segment
+        if len(segment) >= MIN_CALLS:
+            line = flat.count("\n", 0, segment[0][2]) + 1
+            self.end[(rel, line)] = max(self.end.get((rel, line), line), flat.count("\n", 0, segment[-1][2]) + 1)
+            self.chains.append((rel, line, [(n, a) for n, a, _ in segment]))
+
+
+def normalized_lines(flat):
+    out = []
+    for number, raw in enumerate(flat.splitlines(), 1):
+        line = re.sub(r"\s+", " ", raw.strip())
+        if not line or line.startswith(("//", "#", "/*", "*", "--")) or len(line) < 12:
+            continue
+        if re.fullmatch(r"[\s{}()\[\];,]*|(\} )?else \{|return;?|Ok\(\(\)\)|None|\.into\(\),?|\.into_any_element\(\),?", line):
+            continue
+        out.append((number, re.sub(r"\b\d+(\.\d+)?\b", "N", line)))
+    return out
+
+
+# ------------------------------------------------------------------------------ patterns
+def show(calls):
+    return "".join(f".{n}({a})" for n, a in calls)
+
+
+def common_chain(calls, arch):
+    return all(n in arch.common and TRIVIAL_ARG.match(a) for n, a in calls)
+
+
+def chain_patterns(index):
+    """Chains of MIN_CALLS+ equal calls in MIN_FILES+ files; extended as far as they all agree."""
+    windows = defaultdict(list)
+    for chain_id, (_, _, calls) in enumerate(index.chains):
+        for start in range(len(calls) - MIN_CALLS + 1):
+            windows[tuple(calls[start:start + MIN_CALLS])].append((chain_id, start))
+    patterns, seen = [], set()
+    for key, spots in sorted(windows.items(), key=lambda kv: -len(kv[1])):
+        files = {index.chains[c][0] for c, _ in spots}
+        if len(spots) < MIN_COUNT or len(files) < MIN_FILES or common_chain(key, index.arch):
+            continue
+        begin, end = 0, MIN_CALLS
+        while all(s - begin - 1 >= 0 for _, s in spots) and len({index.chains[c][2][s - begin - 1] for c, s in spots}) == 1:
+            begin += 1
+        while all(s + end < len(index.chains[c][2]) for c, s in spots) and len({index.chains[c][2][s + end] for c, s in spots}) == 1:
+            end += 1
+        full = tuple(index.chains[spots[0][0]][2][spots[0][1] - begin: spots[0][1] + end])
+        where = tuple(sorted((index.chains[c][0], index.chains[c][1]) for c, _ in spots))
+        if (full, where) in seen or any(set(where) <= set(w) and show(full) in show(f) for f, w in seen):
+            continue
+        seen.add((full, where))
+        patterns.append(("chain", show(full), where, show(full)))
+    return patterns
+
+
+def block_patterns(index):
+    """Blocks of MIN_BLOCK+ equal lines (texts and numbers aside) in two or more places."""
+    windows = defaultdict(list)
+    for rel, lines in index.lines.items():
+        for i in range(len(lines) - MIN_BLOCK + 1):
+            key = hashlib.sha1("\n".join(t for _, t in lines[i:i + MIN_BLOCK]).encode()).digest()
+            windows[key].append((rel, i))
+    covered, patterns = set(), []
+    for key, spots in windows.items():
+        spots = [s for s in spots if s not in covered]
+        distinct = []
+        for rel, i in spots:  # in one file, overlapping blocks are the same block
+            if all(rel != r or abs(i - j) >= MIN_BLOCK for r, j in distinct):
+                distinct.append((rel, i))
+        if len(distinct) < 2:
+            continue
+        size = MIN_BLOCK
+        while all(i + size < len(index.lines[r]) for r, i in distinct) and len(
+                {index.lines[r][i + size][1] for r, i in distinct}) == 1:
+            size += 1
+        sample = [t for _, t in index.lines[distinct[0][0]][distinct[0][1]: distinct[0][1] + size]]
+        if sum(common_line(t, index.arch) for t in sample) >= 0.8 * size:
+            continue  # only framework idiom (layout chains)
+        for r, i in distinct:
+            covered.update((r, i + k) for k in range(size))
+            index.end[(r, index.lines[r][i][0])] = index.lines[r][min(i + size, len(index.lines[r])) - 1][0]
+        where = tuple(sorted((r, index.lines[r][i][0]) for r, i in distinct))
+        patterns.append(("block", f"{size} lines: {sample[0][:60]}", where, "\n".join(sample)))
+    return patterns
+
+
+def common_line(text, arch):
+    calls = CALL.findall(text)
+    return bool(calls) and re.fullmatch(r"(\s*\.\s*\w+\s*\(.*\)\s*)+[,;)]*", text) is not None and all(
+        n in arch.common and TRIVIAL_ARG.match(re.sub(r"\s+", "", a[1:-1])) for n, a in calls)
+
+
+def destination(where, code, arch):
+    """The layer the extracted piece can live in: every place imports it, none imports upward."""
+    files = {rel for rel, _ in where}
+    if len(files) == 1:
+        return "a function in the same file (one place uses it)", None
+    if not arch.defined:
+        return None, None
+    layers = {arch.layer(rel) for rel in files} - {None}
+    ui = bool(UI.search(code) or STYLE.search(code))
+    if not layers:
+        return arch.destinations.get(max(arch.destinations), ""), None
+    low = min(layers)
+    if ui:
+        visual = min((n for n, d in arch.destinations.items() if n >= 3), default=None)
+        if visual is None or low < visual:
+            return None, (f"uses UI and appears in layer {low}, which cannot import layer "
+                          f"{visual}: split off the part without UI first")
+        return arch.destinations[visual], None
+    target = min(low, 2) if 2 in arch.destinations or low < 2 else low
+    target = max((n for n in arch.destinations if n <= target), default=min(arch.destinations))
+    return arch.destinations[target], None
+
+
+def findings(repo, arch, touched=None, suffixes=None):
+    """Findings; touched {file: changed lines or None = all}: only patterns with a place in those lines."""
+    index = Index(repo, arch, suffixes)
+    out = []
+    for kind, label, where, code in chain_patterns(index) + block_patterns(index):
+        mine = [w for w in where if touched is None or (w[0] in touched and (touched[w[0]] is None or any(
+            n in touched[w[0]] for n in range(w[1], index.end.get(w, w[1]) + 1))))]
+        if not mine:
+            continue
+        files = sorted({r for r, _ in where})
+        target, conflict = destination(where, code, arch)
+        places = ", ".join(f"{r}:{n}" for r, n in where[:6]) + (f" (+{len(where) - 6})" if len(where) > 6 else "")
+        problem = (f'{kind} "{label[:110]}" repeated {len(where)}x in {len(files)} file(s) ({places})'
+                   if kind == "chain" else f'block of {label.split(":")[0]} repeated in {len(where)} places: '
+                   f'"{label.split(": ", 1)[1]}" ({places})')
+        fix = (f"layer conflict: {conflict}" if conflict else
+               f"extract to {target}" if target else "extract to the destination the chosen architecture gives")
+        f = Finding(mine[0][0], mine[0][1], "pattern", problem, fix)
+        f.where, f.code, f.conflict, f.target = where, code, conflict, target
+        out.append(f)
+    store = ACCEPTED_FILE
+    taken = {(p, r, s) for p, r, s, *_ in core.load_accepted(store)} if not core.SELFTEST else set()
+    return [f for f in out if (f.path, f.rule, f.subject) not in taken]
+
+
+# ------------------------------------------------------------------------------- briefing
+OPTIONS = [
+    ("Shared layers", "components/ (visual pieces and components) + lib/ or utils/ (logic without UI); "
+                      "screens only assemble pieces"),
+    ("Feature modules", "each feature has its folder; what two features use moves up to shared/"),
+    ("Local function", "extract inside the same file, without new modules (smallest change)"),
+]
+
+
+def command(*args):
+    """How to run a skill script with this interpreter, for the messages to the agent."""
+    return " ".join(f'"{a}"' if " " in str(a) else str(a) for a in (Path(sys.executable).as_posix(), *args))
+
+
+def briefing(found, arch, trigger):
+    """The text the hook returns to the agent: what to extract, where to, and how without changing behaviour."""
+    lines = [f"Modularization (skill modular, {(HERE / 'SKILL.md').as_posix()}). Trigger: {trigger}."]
+    if not arch.defined:
+        if arch.docs:
+            lines.append(f"The architecture is described in {', '.join(arch.docs)}, but the destination map is "
+                         f"missing. Read the description, write the map to {MAP_FILE.as_posix()} (format in SKILL.md) "
+                         "citing the source, and only then extract.")
+        else:
+            lines.append("The repository defines no architecture. Before extracting, ask the user with "
+                         f"AskUserQuestion which one to adopt and write the choice to {MAP_FILE.as_posix()}:")
+            lines += [f"- {name}: {about}" for name, about in OPTIONS]
+    lines.append("Repeated patterns that involve this session's files:")
+    for n, f in enumerate(found[:PER_ROUND], 1):
+        lines.append(f"{n}. {f.problem} -> {f.fix}")
+    if len(found) > PER_ROUND:
+        lines.append(f"(+{len(found) - PER_ROUND} in the next round or in patterns.py --all)")
+    lines.append(
+        "How to extract: the same sequence of calls, in the same order; only what varies between the places "
+        "becomes a parameter. Replace each place with the new call. Before editing each file, run "
+        "git status --porcelain -- <file> and skip files with changes that are not yours. Layer conflict: "
+        "do not extract, tell the user. "
+        + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
+        + "If it is not a repetition to extract (coincidence, framework idiom), record it: "
+        + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------------------- CLI
+def selftest(record=False):
+    """cases/repo is a fake repository with an architecture; expected.txt is the right output."""
+    core.SELFTEST = True
+    repo = CASES / "repo"
+    got = [str(f) for f in findings(repo, Architecture(repo))]
+    if record:
+        return core.compare_expected(got, CASES / "expected.txt", record=True)
+    differs = core.compare_expected(got, CASES / "expected.txt")
+    problems = hook_selftest()
+    return 1 if differs or problems else 0
+
+
+def hook_selftest():
+    """The hook in a temporary repository: with a map it gives the destination; without, the options; no repeats."""
+    import json
+    import shutil
+    import tempfile
+    gates = HERE.parent / "tautology" / "hooks"
+    problems = []
+    for variant in ("with a map", "without a map"):
+        repo = Path(tempfile.mkdtemp(prefix="modular-"))
+        try:
+            shutil.copytree(CASES / "repo", repo, dirs_exist_ok=True)
+            if variant == "without a map":
+                (repo / MAP_FILE).unlink()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            target = repo / "src" / "screens" / "new" / "view.rs"
+            env = {**os.environ, "CLAUDE_PROJECT_DIR": str(repo)}
+
+            def hook(script, event, **extra):
+                payload = {"hook_event_name": event, "session_id": "selftest", "cwd": str(repo), **extra}
+                run = subprocess.run([sys.executable, str(gates / script)], input=json.dumps(payload),
+                                     capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
+                return run.returncode, run.stderr
+
+            if variant == "with a map":  # an edit far from every pattern does not bring up the old repetition
+                old = repo / "src" / "screens" / "d" / "view.rs"
+                hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(old)})
+                old.write_text(old.read_text(encoding="utf-8") + "\npub const HEIGHT: f32 = 2.0;\n", encoding="utf-8")
+                code, _ = hook("stop_gate.py", "Stop")
+                if code != 0:
+                    problems.append(f"edit away from the patterns: Stop exited {code}, expected 0")
+            hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(target)})
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((CASES / "new_screen.rs").read_text(encoding="utf-8"), encoding="utf-8")
+            code, report = hook("stop_gate.py", "Stop")
+            if code != 2:
+                problems.append(f"{variant}: Stop exited {code}, expected 2")
+            needed = ["new component", "src/components/visual.rs"] if variant == "with a map" else [
+                "AskUserQuestion", "Shared layers"]
+            problems += [f"{variant}: briefing without {n!r}" for n in needed if n not in report]
+            if "flex_1().min_w_0()" in report:
+                problems.append(f"{variant}: framework idiom became a finding")
+            code, _ = hook("stop_gate.py", "Stop")
+            if code != 0:
+                problems.append(f"{variant}: repeated Stop exited {code}, expected 0")
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+    for problem in problems:
+        print(f"HOOK    {problem}")
+    print(f"hook: {'ok' if not problems else f'{len(problems)} problem(s)'}")
+    return problems
+
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("files", nargs="*")
+    parser.add_argument("--all", action="store_true", help="the whole repository")
+    parser.add_argument("--accept", help="line of a finding that is not a repetition to extract")
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--record", action="store_true", help="with --selftest: records the output as expected")
+    args = parser.parse_args()
+    if args.accept:
+        return core.accept(args.accept, args.reason, store=ACCEPTED_FILE, tool="patterns.py")
+    if args.selftest:
+        return selftest(record=args.record)
+    repo = core.REPO
+    arch = Architecture(repo)
+    touched = None if args.all else {Path(f).resolve().relative_to(repo).as_posix(): None for f in args.files}
+    found = findings(repo, arch, touched)
+    for f in found:
+        print(f)
+    if not arch.defined:
+        print(f"no destination map ({MAP_FILE.as_posix()})" + (f"; architecture described in {', '.join(arch.docs)}"
+                                                              if arch.docs else "; the repository defines no architecture"))
+    print(f"{len(found)} pattern(s).")
+    return 1 if found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
