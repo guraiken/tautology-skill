@@ -1,0 +1,39 @@
+{
+  "languages": [
+    "pt",
+    "en"
+  ],
+  "ui_paths": [
+    "src/ui/",
+    "app/src/"
+  ],
+  "sensitive_paths": [
+    "billing"
+  ],
+  "synonyms": [
+    "tarefa task todo",
+    "lembrete reminder"
+  ],
+  "kinds": {
+    "tooltip": [
+      "\\.tip\\(",
+      "\\bhelp_tip\\("
+    ],
+    "hint": [
+      "help_tip"
+    ],
+    "title": [
+      "option_\\w+\\("
+    ]
+  },
+  "tooltip_calls": [
+    "\\.tip\\(",
+    "\\bhelp_tip\\("
+  ],
+  "tooltip_second_arg": [
+    "help_tip"
+  ],
+  "placement_calls": [
+    "option_"
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "languages": [
+    "en"
+  ],
+  "ui_paths": [
+    "src/ui/"
+  ],
+  "test_paths": [],
+  "skip_dirs": [
+    "data",
+    "logs"
+  ],
+  "sensitive_paths": [
+    "billing"
+  ],
+  "synonyms": [
+    "task todo"
+  ],
+  "kinds": {
+    "tooltip": [
+      "\\binfo_tip\\("
+    ],
+    "title": [
+      "section_head\\("
+    ]
+  },
+  "tooltip_calls": [
+    "\\binfo_tip\\("
+  ],
+  "tooltip_second_arg": [],
+  "placement_calls": [
+    "option_row"
+  ],
+  "limits": {
+    "button": [
+      4,
+      28,
+      1
+    ],
+    "title": [
+      6,
+      48,
+      1
+    ],
+    "hint": [
+      16,
+      90,
+      2
+    ],
+    "notice": [
+      22,
+      140,
+      2
+    ],
+    "text": [
+      26,
+      160,
+      2
+    ]
+  },
+  "tooltip_line_chars": 46,
+  "tooltip_lines": 2,
+  "density": 5,
+  "descriptive_words": 8
+}

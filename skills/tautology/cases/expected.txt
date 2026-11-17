@@ -1,0 +1,41 @@
+answers/citacao.md:3 [copy] pleonasm "subir para cima"
+answers/parafrase.md:0 [answer] same idea twice: "Corrigi o cálculo do total na tela de relatório me" / "Depois disso, o relatório mensal passou a corrigir"
+answers/recap.md:0 [answer] same idea twice: "I fixed the monthly total on the report screen so " / "The report screen now fixes the monthly total so i"
+app/src/calc.rs:10 [test] the expected value is the same call that produces the result
+app/src/calc.rs:16 [test] checks the value the test itself wrote
+app/src/dicas.rs:10 [copy] tooltip of ~4 lines in the balloon (146 characters, 2 sentence(s)): "Quando a tarefa vence, o app abre o lemb"
+app/src/dicas.rs:11 [copy] tooltip of ~3 lines in the balloon (107 characters, 2 sentence(s)): "XXXXXX tarefas novas esperando. Abra a l"
+app/src/dicas.rs:12 [copy] tooltip of ~3 lines in the balloon (103 characters, 2 sentence(s)): "Cada filtro procura as palavras no títul"
+app/src/explicacoes.rs:50 [copy] text with 3 sentences (limit 2): "O app lê as listas. Ele guarda as tarefa"
+app/src/explicacoes.rs:55 [copy] "Você pode" is wordy: "Você pode tentar de novo ou voltar."
+app/src/explicacoes.rs:62 [copy] "Buscar tarefa no calendário" says the same as "Buscar no calendário" (line 61)
+app/src/tela.rs:13 [copy] "Clique aqui" explains the obvious: "Clique aqui para abrir as configurações "
+app/src/tela.rs:3 [copy] render: 7 explanatory texts on one screen (limit 5; lines 7, 8, 9, 10, 11, 12)
+app/src/tela.rs:5 [copy] title ends with a period: "Lembretes salvos."
+app/src/tela.rs:6 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
+app/src/tela.rs:7 [copy] "Nesta tela você" explains the obvious: "Nesta tela você encontra todas as suas t"
+app/src/tela2.rs:7 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
+src/ui/tela.py:11 [code] comment restates the code: "incrementa o contador"
+src/ui/tela.py:15 [copy] title with 7 words / 42 characters (limit 6 / 48): "Ajuste os filtros para ver mais resultad"
+src/ui/tela.py:4 [copy] "Procura tarefas" says the same as "Buscar tarefas" (line 3)
+src/ui/tela.py:6 [copy] "Grava a regra no disco para usar depois" says the same as "Salvar regra" (line 5)
+src/ui/tela.py:7 [code] comment restates the code: "fecha a janela"
+tests/test_x.py:3 [test] the expected value is the same call that produces the result
+web/Painel.tsx:10 [copy] "Nesta tela você" explains the obvious: "Nesta tela você encontra todas as suas t"
+web/Painel.tsx:12 [copy] "Buscar tarefa no calendário" says the same as "Buscar no calendário" (line 11)
+web/Painel.tsx:7 [copy] title ends with a period: "Lembretes salvos."
+web/Painel.tsx:8 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
+web/Painel.tsx:9 [copy] tooltip of ~3 lines in the balloon (110 characters, 2 sentence(s)): "Quando a tarefa vence, o app abre o lemb"
+web/Settings.tsx:11 [copy] "Find tasks" says the same as "Search tasks" (line 10)
+web/Settings.tsx:11 [copy] "Search tasks" repeats the text on line 10
+web/Settings.tsx:12 [copy] "You can" is wordy: "You can try again or go back to the list"
+web/Settings.tsx:13 [copy] pleonasm "return back"
+web/Settings.tsx:6 [copy] title ends with a period: "Saved reminders."
+web/Settings.tsx:7 [copy] button with 8 words / 39 characters (limit 4 / 28): "Save all the changes you made right now"
+web/Settings.tsx:8 [copy] "Click here" explains the obvious: "Click here to open the settings of every"
+web/Settings.tsx:9 [copy] "This page shows" explains the obvious: "This page shows all of your saved remind"
+web/aviso.js:4 [copy] "Por favor" is wordy: "Por favor, aguarde enquanto as tarefas c"
+web/calc.test.ts:10 [test] checks the value the test itself wrote
+web/calc.test.ts:14 [test] checks a constant against itself
+web/calc.test.ts:17 [test] test without expect or assert: checks nothing
+web/calc.test.ts:5 [test] the expected value is the same call that produces the result
