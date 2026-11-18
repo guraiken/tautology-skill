@@ -18,7 +18,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve()
 SKILL = HERE.parents[1]
+PLUGIN_ROOT = SKILL.parents[1]
+SELF_IMPROVE_FILE = PLUGIN_ROOT / "SELF_IMPROVE.local.md"
 EDIT_GATE = SKILL.parent / "tautology" / "hooks" / "edit_gate.py"
+SKILL_INVOKE = re.compile(r"(?i)(?:^|[\s/])(?:tautology(?:-debloat-design|-audit-tests)?|modular)\b")
 DEBLOAT = re.compile(r"(?i)(?:^|[\s/])(?:tautology-debloat-design|debloat[-_ ]design)(?:\s|$)|\bdebloat\b")
 DESIGN_FOLLOWUP = re.compile(
     r"(?i)\b(screen\w*|tela\w*|modal\w*|dialog\w*|di[áa]logo\w*|card\w*|cart[ãa]o\w*|cart[õo]es|"
@@ -130,11 +133,13 @@ def main():
     prompt_stamp = state / f"{session}.prompt"
     reminded_file = state / f"{session}.new_reminded"
     prompt = (payload.get("prompt") or payload.get("lastUserInput") or "").strip()
+    is_skill_invoke = bool(SKILL_INVOKE.search(prompt))
     is_debloat = bool(DEBLOAT.search(prompt))
     is_tests_audit = bool(TESTS_AUDIT.search(prompt))
-    is_build_test = bool(BUILD_TEST.search(prompt))
-    is_refactor = bool(REFACTOR.search(prompt)) or is_debloat or is_tests_audit
-    is_build = bool(BUILD_ARTIFACT.search(prompt))
+    is_question = prompt.endswith("?") and not (is_skill_invoke or is_debloat or is_tests_audit)
+    is_build_test = (not is_question) and bool(BUILD_TEST.search(prompt))
+    is_refactor = ((not is_question) and bool(REFACTOR.search(prompt))) or is_debloat or is_tests_audit
+    is_build = (not is_question) and bool(BUILD_ARTIFACT.search(prompt))
     _sync_mode_flag(design_flag, is_debloat, DESIGN_FOLLOWUP, EXIT_DESIGN, prompt)
     _sync_mode_flag(tests_flag, is_tests_audit or is_build_test, TESTS_FOLLOWUP, EXIT_TESTS, prompt)
     if is_refactor or is_build:  # every request passes here: fast regex check
@@ -143,8 +148,8 @@ def main():
         flag.unlink()
     digest = hashlib.sha1(prompt.encode("utf-8", errors="replace")).hexdigest()[:16] if prompt else ""
     already_reminded = prompt_stamp.is_file() and prompt_stamp.read_text(encoding="utf-8").strip() == digest
-    created = newly_created_files(repo, session, state, gate, reminded_file)
-    if ((is_refactor or is_build or is_build_test) and digest and not already_reminded) or created:
+    created = newly_created_files(repo, session, state, gate, reminded_file) if (state / f"{session}.files").is_file() else []
+    if ((is_refactor or is_build or is_build_test or is_skill_invoke) and digest and not already_reminded) or created:
         if digest and not already_reminded:
             prompt_stamp.write_text(digest, encoding="utf-8")
         parts = []
@@ -154,6 +159,8 @@ def main():
             parts.append("During tautology-debloat-design, use only project theme tokens/variables (no hardcoded colors, font sizes or corner radii).")
         if is_tests_audit or is_build_test:
             parts.append("During tautology-audit-tests, check results against independent expected values, guard loops against empty inputs, and consolidate cloned tests without dropping coverage.")
+        if SELF_IMPROVE_FILE.is_file():
+            parts.append(SELF_IMPROVE_FILE.read_text(encoding="utf-8").strip())
         msg = " ".join(parts)
         if created:
             msg = f"New component/script started ({', '.join(created)}). " + msg

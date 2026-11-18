@@ -136,7 +136,7 @@ def tracked(repo):
 def code_files(repo, arch, suffixes=None):
     for rel in tracked(repo):
         path = Path(rel)
-        if path.suffix not in (suffixes or CODE) or SKIP & set(path.parts) or arch.excluded(rel):
+        if path.suffix not in (suffixes or CODE) or rel.endswith(".d.ts") or SKIP & set(path.parts) or arch.excluded(rel):
             continue
         if re.search(r"(^|/)\.(?:claude|agents)/skills/[^/]+/cases/", rel) and not core.SELFTEST:
             continue
@@ -146,7 +146,28 @@ def code_files(repo, arch, suffixes=None):
 
 
 def production(text, suffix):
-    """Production code: Rust's #[cfg(test)] modules stay out (preserving line numbers and any code after them)."""
+    """Production code: Rust's #[cfg(test)] modules and TS type/interface blocks stay out (preserving line numbers)."""
+    if suffix in (".ts", ".tsx"):
+        lines = text.splitlines()
+        out, in_type, depth = [], False, 0
+        for line in lines:
+            if not in_type and re.match(
+                r"^\s*(?:export\s+)?(?:declare\s+)?(?:type\s+[A-Za-z_]\w*(?:<[^>]*>)?\s*=\s*\{|interface\s+[A-Za-z_]\w*\b)",
+                line,
+            ):
+                in_type, depth = True, line.count("{") - line.count("}")
+                out.append("")
+                if depth <= 0 and "{" in line:
+                    in_type = False
+                continue
+            if in_type:
+                depth += line.count("{") - line.count("}")
+                out.append("")
+                if depth <= 0 and ("{" in line or "}" in line or line.rstrip().endswith(";")):
+                    in_type = False
+            else:
+                out.append(line)
+        return "\n".join(out)
     if suffix != ".rs":
         return text
     lines = text.splitlines()
@@ -397,7 +418,12 @@ def findings(repo, arch, touched=None, suffixes=None):
         f = Finding(mine[0][0], mine[0][1], "pattern", problem, fix)
         f.where, f.code, f.conflict, f.target = where, code, conflict, target
         out.append(f)
-    store = ACCEPTED_FILE
+    store = core.project_subdir(repo, "modular") / "accepted.txt"
+    if not core.SELFTEST:
+        scanned_whole = list(index.lines) if touched is None else [
+            rel for rel, lines in touched.items() if lines is None
+        ]
+        core.prune_accepted(scanned_whole, out, "patterns.py", store=store, repo=repo)
     taken = {(p, r, s) for p, r, s, *_ in core.load_accepted(store)} if not core.SELFTEST else set()
     return [f for f in out if (f.path, f.rule, f.subject) not in taken]
 
@@ -449,8 +475,9 @@ def briefing(found, arch, trigger, created=()):
             "git status --porcelain -- <file> and skip files with changes that are not yours. Layer conflict: "
             "do not extract, tell the user. "
             + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
-            + "If it is not a repetition to extract (coincidence, framework idiom), record it: "
-            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
+            + "If it is not a repetition to extract (coincidence, framework idiom), record it silently: "
+            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"')
+            + ". Do not output internal plugin reasoning or exception justifications in the chat; report only concrete changes made.")
     return "\n".join(lines)
 
 
@@ -520,6 +547,16 @@ def hook_selftest():
                 out = json.loads(run.stdout or "{}")
                 if run.returncode != 0 or "injectSteps" not in out or not (repo / ".git/tautology/agy.refactor").is_file():
                     problems.append("Antigravity PreInvocation did not set refactor flag or inject reminder")
+                ts_types = repo / "src" / "typings" / "models.ts"
+                ts_types.parent.mkdir(parents=True, exist_ok=True)
+                ts_types.write_text(
+                    "export type AdminItem = {\n  id: string\n  title: string\n  comment: string\n  status: string\n  createdAt: string\n  updatedAt: string\n}\n"
+                    "export type ShopperItem = {\n  id: string\n  title: string\n  comment: string\n  status: string\n  createdAt: string\n  updatedAt: string\n}\n",
+                    encoding="utf-8",
+                )
+                ts_patterns = findings(repo, Architecture(repo), {"src/typings/models.ts": None}, {".ts"})
+                if ts_patterns:
+                    problems.append(f"TypeScript type declarations triggered pattern: {[str(f) for f in ts_patterns]!r}")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:
@@ -539,7 +576,7 @@ def main():
     parser.add_argument("--record", action="store_true", help="with --selftest: records the output as expected")
     args = parser.parse_args()
     if args.accept:
-        return core.accept(args.accept, args.reason, store=ACCEPTED_FILE, tool="patterns.py")
+        return core.accept(args.accept, args.reason, store=core.project_subdir(core.REPO, "modular") / "accepted.txt", tool="patterns.py")
     if args.selftest:
         return selftest(record=args.record)
     repo = core.REPO
