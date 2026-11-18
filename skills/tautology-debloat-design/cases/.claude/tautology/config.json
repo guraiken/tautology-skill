@@ -1,0 +1,6 @@
+{
+  "languages": ["pt", "en"],
+  "ui_paths": ["src/screens/"],
+  "theme_paths": ["src/theme/"],
+  "tooltip_calls": ["\\.hint\\(", "\\binfo_hint\\("]
+}
