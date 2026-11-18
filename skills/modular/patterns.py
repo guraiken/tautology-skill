@@ -28,7 +28,7 @@ from core import Finding  # noqa: E402
 ACCEPTED_FILE = core.project_subdir(core.REPO, "modular") / "accepted.txt"
 MAP_FILE = Path(".claude") / "modular" / "architecture.md"
 
-CODE = {".rs", ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte"}
+CODE = {".rs", ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".ps1", ".sh", ".bat", ".cmd"}
 SKIP = {"target", "node_modules", "dist", "build", ".venv", "__pycache__", "fixtures", "vendor", ".git"}
 MIN_CALLS = 4      # chain: calls in a row
 MIN_COUNT = 4      # chain: times in total
@@ -47,7 +47,7 @@ BREAKERS = {"child", "children", "on_click", "on_mouse_down", "on_mouse_up", "on
             "with_animation", "on_action", "tooltip", "hint", "map", "and_then_some"}
 TRIVIAL_ARG = re.compile(r'^$|^"S"$|^-?[\d_.]+$|^px\(-?[\d_.]+\)$|^\w+\.\w+$|^\w+$')
 UI = re.compile(r"\bpx\(|\b(div|h_flex|v_flex)\(\)|\.child\(|\.text_\w+\(|\.bg\(|\.border\w*\(|\.rounded\w*\(|"
-                r"\bcx\b|\bWindow\b|\bgpui::|className=|<\w+[\s>]|\bstyle=")
+                r"\bgpui::|className=|<\w+[\s>]|\bstyle=")
 # Style methods (GPUI, Tailwind-like): a chain of only these is a visual piece, even without px() or a colour.
 STYLE = re.compile(r"\.(absolute|relative|top_\w+|left_\w+|right_\w+|bottom_\w+|inset_\w+|size_\w+|rounded\w*|"
                    r"border\w*|bg|shadow\w*|opacity|cursor_\w+|text_\w+|font_\w+|line_height|flex\w*|items_\w+|"
@@ -138,7 +138,7 @@ def code_files(repo, arch, suffixes=None):
         path = Path(rel)
         if path.suffix not in (suffixes or CODE) or SKIP & set(path.parts) or arch.excluded(rel):
             continue
-        if re.search(r"(^|/)\.claude/skills/[^/]+/cases/", rel) and not core.SELFTEST:
+        if re.search(r"(^|/)\.(?:claude|agents)/skills/[^/]+/cases/", rel) and not core.SELFTEST:
             continue
         if core.is_test(rel):
             continue
@@ -146,12 +146,24 @@ def code_files(repo, arch, suffixes=None):
 
 
 def production(text, suffix):
-    """Production code: Rust's test module stays out (it repeats on purpose)."""
-    if suffix == ".rs":
-        m = re.search(r"(?m)^\s*#\[cfg\(test\)\]", text)
-        if m:
-            return text[:m.start()]
-    return text
+    """Production code: Rust's #[cfg(test)] modules stay out (preserving line numbers and any code after them)."""
+    if suffix != ".rs":
+        return text
+    lines = text.splitlines()
+    out, in_test, depth = [], False, 0
+    for line in lines:
+        if not in_test and re.match(r"^\s*#\[cfg\(test\)\]", line):
+            in_test, depth = True, 0
+            out.append("")
+            continue
+        if in_test:
+            depth += line.count("{") - line.count("}")
+            out.append("")
+            if depth <= 0 and ("{" in line or "}" in line or line.rstrip().endswith(";")):
+                in_test = False
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 ARGS = r"\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)"
@@ -170,6 +182,7 @@ class Index:
         self.chains = []   # (rel, line, [(name, args)])
         self.end = {}      # (rel, line) -> last line of the piece
         self.lines = {}    # rel -> [(line, normalized)]
+        self.fns = []      # (rel, line, name, is_public, is_free_ui_helper)
         for rel in code_files(repo, arch, suffixes):
             path = self.repo / rel
             try:
@@ -181,6 +194,17 @@ class Index:
             flat = blank_strings(text)
             self.collect(rel, flat, flat, 0)
             self.lines[rel] = normalized_lines(flat)
+            self.collect_fns(rel, text)
+
+    def collect_fns(self, rel, text):
+        for number, line in enumerate(text.splitlines(), 1):
+            m = re.match(r"^(\s*)(pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)(?:\s*->\s*([^{;]+))?", line)
+            if not m:
+                continue
+            indent, pub, name, params, ret = m.group(1), bool(m.group(2)), m.group(3), m.group(4), (m.group(5) or "").strip()
+            free_ui = (not indent and "self" not in params
+                       and bool(re.search(r"\b(Div|AnyElement|Button|Stateful|ToggleGroup|Svg)\b", ret)))
+            self.fns.append((rel, number, name, pub, free_ui))
 
     def collect(self, rel, flat, text, offset, depth=0):
         """Chains of the text; content (.child, .on_click...) cuts the chain and is scanned inside."""
@@ -220,7 +244,10 @@ def normalized_lines(flat):
             continue
         if re.fullmatch(r"[\s{}()\[\];,]*|(\} )?else \{|return;?|Ok\(\(\)\)|None|\.into\(\),?|\.into_any_element\(\),?", line):
             continue
-        out.append((number, re.sub(r"\b\d+(\.\d+)?\b", "N", line)))
+        norm = re.sub(r"\b\d+(\.\d+)?\b", "N", line)
+        if re.fullmatch(r'[\s()\[\]{},"SN:;]+', norm):
+            continue  # pure literal tuple/table row: ("S", "S", "S"),
+        out.append((number, norm))
     return out
 
 
@@ -318,11 +345,39 @@ def destination(where, code, arch):
     return arch.destinations[target], None
 
 
+def helper_patterns(index, existing):
+    """Screen-local UI helper functions that duplicate a shared component function or another screen's helper."""
+    already = {(r, n) for _, _, where, _ in existing for r, n in where}
+    shared = {}
+    local = defaultdict(list)
+    for rel, line, name, pub, free_ui in index.fns:
+        layer = index.arch.layer(rel)
+        if pub and free_ui and layer is not None and layer <= 3:
+            shared.setdefault(name, (rel, line))
+        elif not pub and free_ui and (layer is None or layer >= 4) and index.arch.is_component(rel) and (rel, line) not in already:
+            local[name].append((rel, line))
+    out = []
+    for name, spots in sorted(local.items()):
+        where = tuple(sorted(spots))
+        if name in shared:
+            s_rel, s_line = shared[name]
+            for rel, line in where:
+                index.end[(rel, line)] = line
+            out.append(("helper", f"fn {name} (already in {s_rel}:{s_line})", (*where, (s_rel, s_line)), "px(0.)"))
+        elif len({r for r, _ in where}) >= 2:
+            for rel, line in where:
+                index.end[(rel, line)] = line
+            out.append(("helper", f"fn {name}", where, "px(0.)"))
+    return out
+
+
 def findings(repo, arch, touched=None, suffixes=None):
     """Findings; touched {file: changed lines or None = all}: only patterns with a place in those lines."""
     index = Index(repo, arch, suffixes)
     out = []
-    for kind, label, where, code in chain_patterns(index) + block_patterns(index):
+    found_patterns = chain_patterns(index) + block_patterns(index)
+    found_patterns += helper_patterns(index, found_patterns)
+    for kind, label, where, code in found_patterns:
         mine = [w for w in where if touched is None or (w[0] in touched and (touched[w[0]] is None or any(
             n in touched[w[0]] for n in range(w[1], index.end.get(w, w[1]) + 1))))]
         if not mine:
@@ -330,9 +385,13 @@ def findings(repo, arch, touched=None, suffixes=None):
         files = sorted({r for r, _ in where})
         target, conflict = destination(where, code, arch)
         places = ", ".join(f"{r}:{n}" for r, n in where[:6]) + (f" (+{len(where) - 6})" if len(where) > 6 else "")
-        problem = (f'{kind} "{label[:110]}" repeated {len(where)}x in {len(files)} file(s) ({places})'
-                   if kind == "chain" else f'block of {label.split(":")[0]} repeated in {len(where)} places: '
-                   f'"{label.split(": ", 1)[1]}" ({places})')
+        if kind == "chain":
+            problem = f'chain "{label[:110]}" repeated {len(where)}x in {len(files)} file(s) ({places})'
+        elif kind == "helper":
+            problem = f'local UI helper "{label}" in {len(files)} file(s) ({places})'
+        else:
+            problem = (f'block of {label.split(":")[0]} repeated in {len(where)} places: '
+                       f'"{label.split(": ", 1)[1]}" ({places})')
         fix = (f"layer conflict: {conflict}" if conflict else
                f"extract to {target}" if target else "extract to the destination the chosen architecture gives")
         f = Finding(mine[0][0], mine[0][1], "pattern", problem, fix)
@@ -357,10 +416,17 @@ def command(*args):
     return " ".join(f'"{a}"' if " " in str(a) else str(a) for a in (Path(sys.executable).as_posix(), *args))
 
 
-def briefing(found, arch, trigger):
+def briefing(found, arch, trigger, created=()):
     """The text the hook returns to the agent: what to extract, where to, and how without changing behaviour."""
     lines = [f"Modularization (skill modular, {(HERE / 'SKILL.md').as_posix()}). Trigger: {trigger}."]
-    if not arch.defined:
+    if created:
+        where = ", ".join(arch.destinations.values()) if arch.defined else "components/, scripts/, bin/, lib/ or utils/"
+        lines.append(
+            f"New component/script started ({', '.join(created[:4])}): ask yourself whether an equivalent "
+            f"component, helper or script already exists in the repository ({where}). If one exists, reuse or "
+            "extend it and delete the duplicate."
+        )
+    if not arch.defined and found:
         if arch.docs:
             lines.append(f"The architecture is described in {', '.join(arch.docs)}, but the destination map is "
                          f"missing. Read the description, write the map to {MAP_FILE.as_posix()} (format in SKILL.md) "
@@ -369,19 +435,22 @@ def briefing(found, arch, trigger):
             lines.append("The repository defines no architecture. Before extracting, ask the user with "
                          f"AskUserQuestion which one to adopt and write the choice to {MAP_FILE.as_posix()}:")
             lines += [f"- {name}: {about}" for name, about in OPTIONS]
-    lines.append("Repeated patterns that involve this session's files:")
-    for n, f in enumerate(found[:PER_ROUND], 1):
-        lines.append(f"{n}. {f.problem} -> {f.fix}")
-    if len(found) > PER_ROUND:
-        lines.append(f"(+{len(found) - PER_ROUND} in the next round or in patterns.py --all)")
-    lines.append(
-        "How to extract: the same sequence of calls, in the same order; only what varies between the places "
-        "becomes a parameter. Replace each place with the new call. Before editing each file, run "
-        "git status --porcelain -- <file> and skip files with changes that are not yours. Layer conflict: "
-        "do not extract, tell the user. "
-        + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
-        + "If it is not a repetition to extract (coincidence, framework idiom), record it: "
-        + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
+    if found:
+        lines.append("Repeated patterns that involve this session's files:")
+        for n, f in enumerate(found[:PER_ROUND], 1):
+            lines.append(f"{n}. {f.problem} -> {f.fix}")
+        if len(found) > PER_ROUND:
+            lines.append(f"(+{len(found) - PER_ROUND} in the next round or in patterns.py --all)")
+        lines.append(
+            "Before creating any new component, helper or script, ask yourself whether an equivalent one already "
+            "exists in the repository; reuse or extend it instead of writing a local copy. "
+            "How to extract: the same sequence of calls, in the same order; only what varies between the places "
+            "becomes a parameter. Replace each place with the new call. Before editing each file, run "
+            "git status --porcelain -- <file> and skip files with changes that are not yours. Layer conflict: "
+            "do not extract, tell the user. "
+            + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
+            + "If it is not a repetition to extract (coincidence, framework idiom), record it: "
+            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
     return "\n".join(lines)
 
 
@@ -448,8 +517,9 @@ def hook_selftest():
                           "lastUserInput": "please refactor this module"}
                 run = subprocess.run([sys.executable, str(mod_gate)], input=json.dumps(agy_in),
                                      capture_output=True, text=True, encoding="utf-8", cwd=repo)
-                if run.returncode != 0 or json.loads(run.stdout or "{}") != {} or not (repo / ".git/tautology/agy.refactor").is_file():
-                    problems.append("Antigravity PreInvocation did not set refactor flag")
+                out = json.loads(run.stdout or "{}")
+                if run.returncode != 0 or "injectSteps" not in out or not (repo / ".git/tautology/agy.refactor").is_file():
+                    problems.append("Antigravity PreInvocation did not set refactor flag or inject reminder")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:

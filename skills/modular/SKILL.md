@@ -5,8 +5,13 @@ description: Finds the same code sequence copied across files (call chains and b
 
 # Modularization
 
-Calling the same function in many places is reuse. The defect is the same **sequence** copied: it
-becomes one function in the right layer, and each place calls it.
+Calling the same function in many places is reuse. The defect is the same **sequence** copied, or a
+new component/helper/script written when one already exists in the repository: it becomes one function
+in the right layer, and each place calls it.
+
+**First question before creating any component, modal, helper or script:** *does this already exist in
+the current repository?* Search the shared layers (`components/`, `scripts/`, `bin/`, `lib/`, `utils/`)
+first and reuse or extend what is already there instead of creating a local copy.
 
 ## What it finds
 
@@ -14,6 +19,8 @@ becomes one function in the right layer, and each place calls it.
   `.rounded(px(8.)).bg(theme.surface).border_1().border_color(theme.border)`.
   `.child`, `.on_click`, `.when` and the like cut the chain: their content is scanned on its own.
 - **Block:** 6+ equal lines (texts and numbers aside) in 2+ places.
+- **Duplicate UI helper:** a screen-local helper function (e.g. `fn form_card`, `fn hint_text`) that
+  reimplements a public function in the design layer or is duplicated across 2+ screen files.
 - Left out: framework idiom (`flex_1().min_w_0()...`, plus the `idioms:` list), Rust `#[cfg(test)]`
   modules, test files, and the `exclude:` folders of the map.
 
