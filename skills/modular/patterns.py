@@ -25,7 +25,7 @@ sys.path.insert(0, str(HERE.parent / "tautology"))
 import core  # noqa: E402  (the tautology skill: findings, accepted findings, test-file detection)
 from core import Finding  # noqa: E402
 
-ACCEPTED_FILE = core.REPO / ".claude" / "modular" / "accepted.txt"
+ACCEPTED_FILE = core.project_subdir(core.REPO, "modular") / "accepted.txt"
 MAP_FILE = Path(".claude") / "modular" / "architecture.md"
 
 CODE = {".rs", ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte"}
@@ -62,7 +62,8 @@ class Architecture:
     def __init__(self, repo):
         self.repo, self.layers, self.destinations, self.outside = Path(repo), [], {}, []
         self.components, self.common, self.verify, self.source = [], set(COMMON), "", ""
-        self.file = self.repo / MAP_FILE
+        agents_map = self.repo / ".agents" / "modular" / "architecture.md"
+        self.file = agents_map if agents_map.is_file() else self.repo / MAP_FILE
         self.docs = []
         if self.file.is_file():
             self._read(self.file.read_text(encoding="utf-8"))
@@ -114,7 +115,7 @@ def described_architecture(repo):
         name = Path(rel).name.lower()
         if name in ("architecture.md", "arquitetura.md"):
             found.append(rel)
-        elif name in ("agents.md", "claude.md", "readme.md") and "/" not in rel:
+        elif name in ("agents.md", "claude.md", "gemini.md", "readme.md") and "/" not in rel:
             text = (Path(repo) / rel).read_text(encoding="utf-8", errors="replace")
             if re.search(r"(?im)^#+ .*(architecture|arquitetura|layers?|camadas?)\b", text):
                 found.append(rel)
@@ -441,6 +442,14 @@ def hook_selftest():
             code, _ = hook("stop_gate.py", "Stop")
             if code != 0:
                 problems.append(f"{variant}: repeated Stop exited {code}, expected 0")
+            if variant == "with a map":
+                mod_gate = HERE / "hooks" / "modular_gate.py"
+                agy_in = {"hookEventName": "PreInvocation", "conversationId": "agy", "cwd": str(repo),
+                          "lastUserInput": "please refactor this module"}
+                run = subprocess.run([sys.executable, str(mod_gate)], input=json.dumps(agy_in),
+                                     capture_output=True, text=True, encoding="utf-8", cwd=repo)
+                if run.returncode != 0 or json.loads(run.stdout or "{}") != {} or not (repo / ".git/tautology/agy.refactor").is_file():
+                    problems.append("Antigravity PreInvocation did not set refactor flag")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:

@@ -31,18 +31,27 @@ def load(name, path):
 
 def main():
     payload = json.load(sys.stdin)
-    if payload.get("hook_event_name") != "UserPromptSubmit":
+    agy = "hookEventName" in payload
+    event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
+    if event not in ("UserPromptSubmit", "PreInvocation"):
+        if agy:
+            print("{}")
         return 0
-    repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or ".").resolve()
+    workspace = (payload.get("workspacePaths") or [None])[0]
+    repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or workspace or ".").resolve()
     git = repo / ".git"
     state = git / "tautology" if git.is_dir() else repo / ".tautology-state"
-    session = "".join(c for c in str(payload.get("session_id", "session")) if c.isalnum() or c in "-_")[:80]
+    raw_session = payload.get("session_id") or payload.get("conversationId") or "session"
+    session = "".join(c for c in str(raw_session) if c.isalnum() or c in "-_")[:80]
     flag = state / f"{session}.refactor"
-    if REFACTOR.search(payload.get("prompt") or ""):  # every request passes here: no detector loaded
+    prompt = payload.get("prompt") or payload.get("lastUserInput") or ""
+    if REFACTOR.search(prompt):  # every request passes here: no detector loaded
         state.mkdir(parents=True, exist_ok=True)
         flag.write_text("1", encoding="utf-8")
     elif flag.exists():
         flag.unlink()
+    if agy:
+        print("{}")
     return 0
 
 
@@ -61,7 +70,8 @@ def stop_report(repo, session, state, gate):
         if not raw or not path.is_file() or not path.resolve().is_relative_to(repo):
             continue
         rel = path.resolve().relative_to(repo).as_posix()
-        if path.suffix not in patterns.CODE or arch.excluded(rel) or patterns.core.is_test(rel) or rel.startswith(".claude/"):
+        if (path.suffix not in patterns.CODE or arch.excluded(rel) or patterns.core.is_test(rel)
+                or rel.startswith(".claude/") or rel.startswith(".agents/")):
             continue
         snap = gate.snapshot_of(state, session, path)
         new = snap.is_file() and snap.stat().st_size == 0
@@ -96,4 +106,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as error:  # a broken hook must never block a prompt
         print(f"modular_gate: {error}", file=sys.stderr)
+        print("{}")
         sys.exit(0)

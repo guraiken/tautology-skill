@@ -33,8 +33,8 @@ Without the map:
 
 ## The hook
 
-- **UserPromptSubmit** (`hooks/modular_gate.py`): a request that says refactor/extract/modularize/reorganize
-  marks the session.
+- **UserPromptSubmit / PreInvocation** (`hooks/modular_gate.py`): a request that says
+  refactor/extract/modularize/reorganize marks the session.
 - **Stop** (the tautology skill's `hooks/stop_gate.py` calls `modular_gate.stop_report`): takes the edited
   files (noted by the tautology skill's `edit_gate.py`, which knows when a file is new). A new or changed
   component, or any file in a refactor, enters. A pattern touching those files sends the answer back
