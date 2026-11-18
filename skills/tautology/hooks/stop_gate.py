@@ -15,6 +15,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parent
 MODULAR = SKILL.parent / "modular" / "hooks" / "modular_gate.py"
+DESIGN_AUDIT = SKILL.parent / "tautology-debloat-design" / "design_audit.py"
+TEST_AUDIT = SKILL.parent / "tautology-audit-tests" / "test_audit.py"
 LIMIT = 25
 
 
@@ -74,6 +76,7 @@ def stop_report(payload, repo, session, state):
     sys.path.insert(0, str(SKILL))
     hunt = load("hunt", SKILL / "hunt.py")
     os.chdir(repo)
+    hunt.core.use_repo(repo)
     files = []
     if edited.is_file():
         files = [Path(p) for p in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if p]
@@ -134,6 +137,13 @@ def main():
     reports = [stop_report(payload, repo, session, state)]
     if MODULAR.is_file():
         reports.append(load("modular_gate", MODULAR).stop_report(repo.resolve(), session, state, gate))
+    if (state / f"{session}.design").is_file() and DESIGN_AUDIT.is_file():
+        reports.append(load("design_audit", DESIGN_AUDIT).stop_report(repo.resolve(), session, state, gate))
+    if TEST_AUDIT.is_file():
+        reports.append(load("test_audit", TEST_AUDIT).stop_report(
+            repo.resolve(), session, state, gate,
+            only_new_tests=not (state / f"{session}.tests_audit").is_file(),
+        ))
     reports = [r for r in reports if r]
     if not reports:
         if agy:

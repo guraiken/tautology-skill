@@ -3,7 +3,10 @@
 A Claude Code and Google Antigravity plugin that catches **tautology** before the agent hands you its
 work: UI text that repeats its neighbour, tests that confirm themselves, comments that restate the code,
 and answers that say the same thing twice. A second skill, **modular**, finds code sequences copied
-across files and says where to extract them.
+across files and says where to extract them; **tautology-debloat-design** (`/tautology-debloat-design <screen>`)
+audits and simplifies overloaded UI hierarchy and hardcoded styling using the project's theme tokens; and
+**tautology-audit-tests** (`/tautology-audit-tests [scope]`) audits tests for self-confirming, flaky, or
+duplicated suites.
 
 It runs by itself through hooks. You do not have to remember to call it.
 
@@ -33,10 +36,8 @@ one-line reason.
    itself in one Python process. A new finding sends the answer back **once**, with a list of findings
    and a fix for each. A finding that was already shown never blocks again, and `stop_hook_active`
    always lets the answer through, so Claude cannot get stuck in a loop.
-3. **When you send a request** (`UserPromptSubmit`), `modular_gate.py` notes whether it asks for a refactor.
-   At `Stop`, a new or changed component, or any file touched during a refactor, is checked for copied
-   sequences. If the project has no architecture map, Claude asks you which layout to adopt before it
-   extracts anything.
+3. **When you send a request** (`UserPromptSubmit`), `modular_gate.py` notes refactors, UI design debloat, or new test requests.
+   At `Stop`, a new or changed component, any file touched during a refactor, or **any newly created test file or new test function** triggers its deep check (`modular`, `design_audit`, or `test_audit`). If the project has no architecture map, Claude asks you which layout to adopt before extracting.
 
 Session state lives in `.git/tautology/` of your project and is never committed.
 
@@ -103,6 +104,10 @@ Settings live under `.claude/` (or `.agents/` when present):
 python skills/tautology/hunt.py --diff               # changes against HEAD
 python skills/tautology/hunt.py --all path/to/file   # a whole file
 python skills/modular/patterns.py --all              # copied sequences in the repository
+python skills/tautology-debloat-design/design_audit.py --find <screen>
+python skills/tautology-debloat-design/design_audit.py --all path/to/screen
+python skills/tautology-audit-tests/test_audit.py --find <module>
+python skills/tautology-audit-tests/test_audit.py --all path/to/tests
 ```
 
 ## Self-tests
@@ -110,6 +115,8 @@ python skills/modular/patterns.py --all              # copied sequences in the r
 ```
 python skills/tautology/hunt.py --selftest
 python skills/modular/patterns.py --selftest
+python skills/tautology-debloat-design/design_audit.py --selftest
+python skills/tautology-audit-tests/test_audit.py --selftest
 ```
 
 Both compare the hunt with the expected findings in `cases/` and run the hooks end to end in a
