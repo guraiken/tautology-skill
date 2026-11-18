@@ -36,7 +36,7 @@ import visual_check  # noqa: E402
 CHECKS = {"design", "style", "bloat"}
 STYLE_EXT = {".css", ".scss"}
 SCAN_EXT = core.CODE | STYLE_EXT
-DEFAULT_THEME_RE = re.compile(r"(^|/)(theme|tokens|palette|colors|styles?)(/|\.)", re.I)
+DEFAULT_THEME_RE = re.compile(r"(^|/)(?:(?:theme|tokens|palette|colors)(?:/|\.)|styles?/)", re.I)
 GENERIC_UI_DIRS = {"screens", "views", "pages", "components", "dialogs", "modals", "ui", "src"}
 SCREEN_SUBDIRS = {"view", "views", "ui", "dialogs", "modals", "detail"}
 
@@ -152,13 +152,13 @@ def discover_project_tokens(root=None):
 
     def inspect(rel, suffix, source):
         is_theme = is_theme_file(rel) or suffix in STYLE_EXT or "tailwind.config" in Path(rel).name.lower()
-        if (re.search(r"\bPalette\b|\bcreateTheme\b|--bg\b|--surface\b|--[\w-]*(?:color|bg|surface|accent|card)\s*:|\bp\.(surface|card|text|primary)\b", source)
+        if (re.search(r"\bPalette\b|\bcreateTheme\b|--bg\b|--surface\b|--[\w-]*(?:color|bg|surface|accent|card)\s*:|\bp\.(surface|card|text|primary)\b|\b(?:bg|c|b--)-(?:base|action-primary|muted-[1-5]|on-base|danger|warning|success)\b", source)
                 or (is_theme and re.search(r"\bcolors\s*:", source))):
             tokens["has_palette"] = True
-        if (re.search(r"\b(?:visual|typography)::(?:BODY|FOOTNOTE|CAPTION|EMPHASIS|HEADLINE|TITLE)\b|--[\w-]*(?:font|text)[-_]?size\b|typography\.|\btext-(?:xs|sm|base|lg|xl|2xl)\b", source)
+        if (re.search(r"\b(?:visual|typography)::(?:BODY|FOOTNOTE|CAPTION|EMPHASIS|HEADLINE|TITLE)\b|--[\w-]*(?:font|text)[-_]?size\b|typography\.|\btext-(?:xs|sm|base|lg|xl|2xl)\b|\bt-(?:heading-[1-6]|body|small|mini|action)\b", source)
                 or (is_theme and re.search(r"\b(?:BODY|FOOTNOTE|CAPTION|EMPHASIS|HEADLINE|TITLE|fontSize)\b", source))):
             tokens["has_font_tokens"] = True
-        if re.search(r"\b\w+_radius\b|--[\w-]*radius\b|\brounded\w*:\s*[\d.]+|card_radius|control_radius|\brounded-(?:sm|md|lg|xl|2xl)\b", source):
+        if re.search(r"\b\w+_radius\b|--[\w-]*radius\b|\brounded\w*:\s*[\d.]+|card_radius|control_radius|\brounded-(?:sm|md|lg|xl|2xl)\b|\bbr[0-4]\b", source):
             tokens["has_radius_tokens"] = True
         if core.C.tooltip_call.search(source) or re.search(r"<Tooltip\b|data-tooltip|\btitle=", source):
             tokens["uses_tooltips"] = True
@@ -198,8 +198,16 @@ def find_screens(query, root=None):
         if score > 0:
             if re.search(r"(^|/)(?:screens|views|pages|dialogs|modals)/", rel):
                 score += 3
+            elif re.search(r"(^|/)components/", rel):
+                score += 2
             if "view" in Path(rel).stem:
                 score += 1
+            if re.search(r"<[A-Za-z]", source):
+                score += 2
+            if re.search(r"(^|/)(?:hooks|utils|typings|services|graphql)/", rel):
+                score = max(1, score - 6)
+            elif len(source.splitlines()) <= 15 and not re.search(r"<[A-Za-z]", source):
+                score = max(1, score - 4)
             if path.suffix.lower() in STYLE_EXT:
                 score = max(1, score - 2)
             siblings = sorted(r for r in by_rel if Path(r).parent == Path(rel).parent and r != rel)
@@ -1028,6 +1036,12 @@ def stop_report(repo, session, state, gate):
         only = gate.new_lines(snap, path) if snap.is_file() else core.added_lines(path)
         if only is None or only:
             findings += scan_file(path, only=only, tokens=tokens, checks={"design", "style"}, cache=cache)
+    core.prune_paths(
+        [Path(r) for r in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if r],
+        lambda p: raw_scan_file(p, only=None, tokens=tokens, checks=CHECKS, cache=cache),
+        "design_audit.py",
+        repo=root,
+    )
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keyed = {hashlib.sha1(f.key().encode()).hexdigest()[:16]: f for f in findings}
     new = [f for k, f in keyed.items() if k not in before]
@@ -1041,7 +1055,8 @@ def stop_report(repo, session, state, gate):
     lines += [f"- {f}" for f in new[:20]]
     lines.append(
         "Fix overloaded layout hierarchy and replace hardcoded styles with project theme variables/tokens. "
-        f'Record intentional exceptions with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>"'
+        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>". '
+        "Do not output internal plugin reasoning or exception justifications in the chat; report only concrete changes made."
     )
     return "\n".join(lines)
 
@@ -1226,6 +1241,11 @@ def selftest():
             ".card-extra { color: #ff00aa; font-size: 15px; border-radius: 14px; background: var(--bg); }\n",
             encoding="utf-8",
         )
+        mod_css = web_repo / "src" / "components" / "styles.css"
+        mod_css.write_text(".mod { color: #ff00aa; font-size: 15px; border-radius: 14px; }\n", encoding="utf-8")
+        hook_ts = web_repo / "src" / "hooks" / "useCard.ts"
+        hook_ts.parent.mkdir(parents=True, exist_ok=True)
+        hook_ts.write_text("import { useState } from 'react'\nexport function useCard() { return useState(false) }\n", encoding="utf-8")
         os.chdir(web_repo)
         core.use_repo(web_repo)
         web_tokens = discover_project_tokens(web_repo)
@@ -1244,6 +1264,12 @@ def selftest():
         tok_out = scan_file(tok_css, only=None, tokens=web_tokens, checks=CHECKS)
         if tok_out:
             problems.append(f"z_theme/tokens.css reported false positive(s): {[str(f) for f in tok_out]!r}")
+        mod_out = "\n".join(str(f) for f in scan_file(mod_css, only=None, tokens=web_tokens, checks=CHECKS))
+        if "CSS color literal" not in mod_out:
+            problems.append(f"components/styles.css was skipped as theme file:\n{mod_out}")
+        find_hits = [rel for _, rel, _ in find_screens("card", root=web_repo)]
+        if not find_hits or find_hits[0] != "src/components/TailwindCard.tsx":
+            problems.append(f"find_screens('card') did not prioritize component JSX over hooks: {find_hits!r}")
 
         # State discovery + generic manifest + pure-stdlib visual PNG checks
         states_manifest = web_repo / "states.json"
@@ -1483,6 +1509,12 @@ def main():
         if only is not None and not only:
             continue
         found += scan_file(path, only=only, tokens=tokens, checks=wanted, cache=cache)
+    if args.all and not args.diff and wanted == CHECKS:
+        core.prune_paths(
+            paths,
+            lambda p: raw_scan_file(p, only=None, tokens=tokens, checks=CHECKS, cache=cache),
+            "design_audit.py",
+        )
     for f in found:
         print(f)
     print(f"{len(found)} design finding(s).")

@@ -665,6 +665,12 @@ def stop_report(repo, session, state, gate, only_new_tests=False):
         if only_new_tests and not _has_new_test(path, snap, only):
             continue
         findings += scan_file(path, only=only, include_baseline=False)
+    core.prune_paths(
+        [Path(r) for r in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if r],
+        lambda p: raw_scan_file(p, only=None, checks=CHECKS, include_baseline=True),
+        "test_audit.py",
+        repo=root,
+    )
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keyed = {hashlib.sha1(f.key().encode()).hexdigest()[:16]: f for f in findings}
     new = [f for k, f in keyed.items() if k not in before]
@@ -678,7 +684,8 @@ def stop_report(repo, session, state, gate, only_new_tests=False):
     lines += [f"- {f}" for f in new[:20]]
     lines.append(
         "Fix self-confirming assertions, flaky skips/sleeps, and cloned tests without removing test coverage. "
-        f'Record intentional exceptions with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>"'
+        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>". '
+        "Do not output internal plugin reasoning or exception justifications in the chat; report only concrete changes made."
     )
     return "\n".join(lines)
 
@@ -951,6 +958,8 @@ def main():
         if only is not None and not only:
             continue
         found += scan_file(path, only=only, checks=wanted)
+    if args.all and not args.diff and wanted == CHECKS:
+        core.prune_paths(paths, lambda p: raw_scan_file(p, only=None, checks=CHECKS), "test_audit.py")
     for f in found:
         print(f)
     print(f"{len(found)} test finding(s).")
