@@ -8,9 +8,9 @@ if defined TAUTOLOGY_PYTHON (
     exit /b 0
   )
 )
-py -3 -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul
+py.exe -3 -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul
 if not errorlevel 1 (
-  py -3 %*
+  py.exe -3 %*
   exit /b 0
 )
 for %%C in (python3.exe python.exe) do (
