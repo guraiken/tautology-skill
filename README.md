@@ -1,9 +1,9 @@
 # tautology-skill
 
-A Claude Code plugin that catches **tautology** before Claude hands you its work: UI text that repeats
-its neighbour, tests that confirm themselves, comments that restate the code, and answers that say the
-same thing twice. A second skill, **modular**, finds code sequences copied across files and says where
-to extract them.
+A Claude Code and Google Antigravity plugin that catches **tautology** before the agent hands you its
+work: UI text that repeats its neighbour, tests that confirm themselves, comments that restate the code,
+and answers that say the same thing twice. A second skill, **modular**, finds code sequences copied
+across files and says where to extract them.
 
 It runs by itself through hooks. You do not have to remember to call it.
 
@@ -58,6 +58,8 @@ the search).
 
 ## Install
 
+### Claude Code
+
 ```
 /plugin marketplace add guraiken/tautology-skill
 /plugin install tautology@tautology-skill
@@ -66,10 +68,24 @@ the search).
 The skills are then available as `/tautology:tautology` (add `copy`, `code`, `tests` or `answer` to
 narrow the scan) and `/tautology:modular`.
 
-It needs Python 3.10 or newer, standard library only. `bin/py.sh` looks for `python3`, `python` and
-`py -3`; set `TAUTOLOGY_PYTHON` to choose one. Without Python the hooks do nothing and never block.
+### Google Antigravity
+
+Clone into your global plugins folder (or into `.agents/plugins/tautology` inside a workspace):
+
+```
+git clone https://github.com/guraiken/tautology-skill ~/.gemini/config/plugins/tautology
+```
+
+Antigravity discovers `plugin.json`, `hooks.json`, and `skills/` automatically (`PreToolUse`,
+`PreInvocation`, and `Stop` hooks run on both Unix via `bin/py.sh` and Windows via `bin/py.cmd`).
+
+It needs Python 3.10 or newer, standard library only. `bin/py.sh` and `bin/py.cmd` look for `python3`,
+`python` and `py -3`; set `TAUTOLOGY_PYTHON` to choose one. Without Python the hooks do nothing and
+never block.
 
 ## Per-project settings (optional)
+
+Settings live under `.claude/` (or `.agents/` when present):
 
 - `.claude/tautology/config.json`: languages, UI folders, the names of your own components (a tooltip
   helper, a settings row), synonyms from your domain, size limits. See
