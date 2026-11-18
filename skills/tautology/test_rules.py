@@ -25,7 +25,9 @@ def macro_args(line, start):
 RUST_LET = re.compile(r"^\s*let\s+(?:mut\s+)?(\w+)\s*(?::[^=]+)?=\s*(.+?);\s*$")
 
 
-RUST_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+")
+RUST_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+RUST_TEST_ATTR = re.compile(r"^\s*#\[(?:\w+::)*test\b")
+RUST_CHECK = re.compile(r"\b(assert\w*!|panic!|unreachable!|unwrap\w*\(|expect\w*\(|check\w*\(|verify\w*\()")
 
 
 RUST_LITERAL = re.compile(r'-?\d[\d_.]*\w*|"(?:[^"\\]|\\.)*"|true|false|\'.\'')
@@ -116,13 +118,39 @@ def macro_args_js(line, start):
 
 
 def rust_test_checks(rel, lines, start, look, out):
-    """Rust tests: the expected value is a variable the test built from the same expression."""
+    """Rust tests: the expected value is a variable the test built from the same expression, or a test without checks."""
     lets, count, since = {}, Counter(), {}
+    pending_test, opened, fn_name, checks = False, None, "", 0
+
+    def close():
+        if opened and look(opened) and checks == 0:
+            out.append(Finding(rel, opened, "test", f"{fn_name} checks nothing (no assert)",
+                               "check the result, or delete the test"))
+
     for number in range(start, len(lines) + 1):
         line = lines[number - 1]
-        if RUST_FN.match(line):
-            lets, count, since = {}, Counter(), {}
+        if RUST_TEST_ATTR.match(line):
+            pending_test = True
             continue
+        if re.match(r"^\s*#\[should_panic\b", line):
+            checks += 1
+            continue
+        fn_match = RUST_FN.match(line)
+        if fn_match:
+            close()
+            lets, count, since = {}, Counter(), {}
+            if pending_test:
+                opened, fn_name = number, fn_match.group(1)
+                checks = 1 if "->" in line else 0
+                brace = line.find("{")
+                if brace >= 0 and RUST_CHECK.search(line[brace:]):
+                    checks += 1
+            else:
+                opened, fn_name, checks = None, "", 0
+            pending_test = False
+            continue
+        if opened and RUST_CHECK.search(line):
+            checks += 1
         m = RUST_LET.match(line)
         if m:
             lets[m.group(1)] = m.group(2).strip()
@@ -148,6 +176,7 @@ def rust_test_checks(rel, lines, start, look, out):
                 else:
                     problem = SAME_CALL
                 out.append(Finding(rel, number, "test", problem, FIX_EXPECTED))
+    close()
 
 
 def rust_line_checks(rel, number, line, out):

@@ -91,8 +91,9 @@ the table yet (add it to `synonyms` in the settings).
   without losing the guarantee.
 - The same text in several places of a file is code organisation (`[code]`, becomes a constant) and
   shows only with `--all`, not in the hook.
-- Density: more than `density` (5) explanatory texts (8+ words) in one screen function. One explanation
-  per screen; the rest becomes a short label or goes.
+- Density: more than `density` (5) explanatory texts (8+ words) in one screen function. List the
+  elements that clutter the area, then **eliminate** them (or shorten to a label), or **move them to
+  a tooltip** if the project already uses tooltips.
 - The kind comes from the call that receives the text (`button(`, `.tooltip(`, `placeholder`, `<h2>`...);
   project components are added in `kinds`. When unsure it assumes a paragraph, the loosest limit.
 
@@ -104,6 +105,8 @@ the table yet (add it to `synonyms` in the settings).
 - Checks nothing: no assert, or `assert True`.
 
 **Code and scripts:**
+- Before creating any new component, helper or script, ask yourself whether an equivalent one already
+  exists in the repository; search and reuse or extend it instead of writing a second copy.
 - A function that only forwards the same arguments to another: call the original.
 - A comment or docstring that says what the name or the line already says. A good comment says **why**.
 - A stuttering name (`config_config`).
@@ -117,9 +120,11 @@ the table yet (add it to `synonyms` in the settings).
 ## How to fix
 
 1. Cut first, rewrite second: text that only repeats goes entirely.
-2. Use the short, common term the user already sees in the app ("Save", not "Save the changes made").
-3. One idea per text. Safety text (payment, terms) gets shorter without losing the guarantee.
-4. Tautological test: rewrite it to check what the code **produces**, with the expected value from
+2. High-bloat area: list every element cluttering the surface, eliminate what is redundant, or move
+   secondary explanations into a tooltip (only if the project already uses tooltips).
+3. Use the short, common term the user already sees in the app ("Save", not "Save the changes made").
+4. One idea per text. Safety text (payment, terms) gets shorter without losing the guarantee.
+5. Tautological test: rewrite it to check what the code **produces**, with the expected value from
    outside. Do not delete a test to silence the finding without telling the user.
 
 ## False positives

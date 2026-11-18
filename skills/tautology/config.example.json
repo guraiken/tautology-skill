@@ -61,5 +61,19 @@
   "tooltip_line_chars": 46,
   "tooltip_lines": 2,
   "density": 5,
-  "descriptive_words": 8
+  "descriptive_words": 8,
+  "theme_paths": [
+    "src/theme/"
+  ],
+  "design": {
+    "max_container_depth": 3,
+    "max_cards": 6,
+    "max_dividers": 4,
+    "max_badges": 6,
+    "max_icons": 10,
+    "max_header_stack": 2,
+    "max_info_hints": 6,
+    "states_file": "",
+    "capture_command": ""
+  }
 }

@@ -121,33 +121,39 @@ def propagated(l1, l2):
     return all(SINK.search(l) and not rendered.search(l) for l in (l1, l2))
 
 
-def near_repeats(rel, ui_literals, out, lines=(), whole=False):
-    """Neighbouring UI texts (6 lines) that say the same: title vs subtitle, label vs hint."""
+def near_repeats(rel, ui_literals, out, lines=(), whole=False, repeated=()):
+    """Neighbouring UI texts (6 lines) or substantial screen-wide texts that say the same:
+    title vs subtitle, label vs hint, modal subtitle vs input placeholder/hint."""
     for i, (n1, t1, l1) in enumerate(ui_literals):
         for n2, t2, l2 in ui_literals[i + 1:]:
-            if n2 - n1 > 6:
-                break
             if n2 == n1:
                 continue  # variants on one line (singular/plural, $/%) never show together
+            far = n2 - n1 > 6
             a, b = ui_concepts(t1), ui_concepts(t2)
             suffix = Path(rel).suffix
-            if len(a) < 2 or len(b) < 2 or (lines and alternatives(lines, n1, n2)):
+            min_concepts = 4 if far else 2
+            if len(a) < min_concepts or len(b) < min_concepts:
+                continue
+            if not far and lines and alternatives(lines, n1, n2):
+                continue
+            if far and lines and render_owner(lines, n1) == render_owner(lines, n2) and alternatives(lines, n1, n2):
                 continue
             if (table_row(l1, suffix) and table_row(l2, suffix)) or siblings(l1, t1, l2, t2):
                 continue
             if plain(t1) == plain(t2):
-                if propagated(l1, l2):
+                if far or propagated(l1, l2):
                     continue
-                if whole and len(plain(t1).split()) >= 4:
+                if plain(t1) in repeated:
                     continue  # the whole-file scan already reports it as "the same text appears Nx"
                 out.append(Finding(rel, n2, "copy", f'"{t2[:50]}" repeats the text on line {n1}',
                                    "keep one, where the eye lands first"))
-            elif (a <= b or b <= a) and len(a ^ b) <= 3:  # the longer one only adds 1-3 ideas
+            elif ((a <= b or b <= a) and len(a ^ b) <= (2 if far else 3)) or (
+                    far and len(a & b) >= 5 and len(a & b) / min(len(a), len(b)) >= 0.65):
                 same_words = {stem(w) for w in words(PLACEHOLDER.sub(" ", t1))} == {stem(w) for w in words(PLACEHOLDER.sub(" ", t2))}
                 if same_words:
                     continue  # singular/plural or another number in the same notice
                 short, long = (t1, t2) if len(a) <= len(b) else (t2, t1)
-                if new_information(short, long):
+                if new_information(t1, t2) if far else new_information(short, long):
                     continue  # the addition is information (where, when, how much, the opposite)
                 out.append(Finding(rel, n2, "copy", f'"{t2[:50]}" says the same as "{t1[:40]}" (line {n1})',
                                    "cut what repeats; a text that only repeats goes"))
@@ -189,8 +195,9 @@ def text_kind(lines, number, line):
         if pattern.search(strip_literals(line)) or (kind == "hint" and C.hint_raw.search(line)):
             return kind
     if re.match(r'\s*\.child\(\s*"|\s*\{?"', line):
-        # Climb to the receiver of the chain (a less indented line): button(...)\n    .child("Save").
-        # Siblings at the same indent (.child(...) of the same div) do not count.
+        # Climb to the receiver or enclosing call (a less indented line), or check a tuple key right above.
+        if number >= 2 and C.hint_raw.search(lines[number - 2]):
+            return "hint"
         indent = len(line) - len(line.lstrip())
         for back in range(number - 2, max(-1, number - 10), -1):
             above = lines[back]
@@ -198,8 +205,11 @@ def text_kind(lines, number, line):
             if not above.strip() or depth >= indent:
                 continue
             for kind, pattern in C.kinds:
-                if pattern.search(strip_literals(above)):
+                if pattern.search(strip_literals(above)) or (kind == "hint" and C.hint_raw.search(above)):
                     return kind
+            if re.search(r"[(,{]\s*$", above) and not re.search(r"\b(?:div|h_flex|v_flex)\s*\(\s*$", above):
+                indent = depth
+                continue  # multi-line call or argument wrapper (Some((, if ... {): keep climbing
             if not re.fullmatch(r"\s*\.\w+\(\s*", above) and not re.match(r"\s*<\w", above):
                 break  # receiver without a kind (div(), h_flex()...): plain text
             if re.match(r"\s*<\w", above):
@@ -240,7 +250,7 @@ def bloat_checks(rel, lines, suffix, look, skip, test_from, out):
             # Density: only what stays on screen at once (not a match arm, not a built message).
             placed = C.placed.search(line) and "=>" not in line
             if placed and kind in ("tooltip", "hint", "text") and len(body.split()) >= C.descriptive:
-                explaining[render_owner(lines, number)].append(number)
+                explaining[render_owner(lines, number)].append((number, literal))
             if not look(number):
                 continue
             obvious = C.obvious.search(literal) if C.obvious else None
@@ -271,11 +281,20 @@ def bloat_checks(rel, lines, suffix, look, skip, test_from, out):
             if kind == "title" and len(said) == 1 and literal.rstrip().endswith(".") and count <= words_max:
                 out.append(Finding(rel, number, "copy", f'title ends with a period: "{literal[:40]}"', "drop the period"))
     tooltip_checks(rel, lines, suffix, look, skip, test_from, out)
-    for (start, name), numbers in explaining.items():
+    uses_tooltips = bool(C.raw.get("tooltip_calls")) or any(
+        C.tooltip_call.search(l) or re.search(r"data-tooltip|\btitle=", l) for l in lines
+    )
+    for (start, name), entries in explaining.items():
+        numbers = [n for n, _ in entries]
         if start and len(numbers) > C.density and any(look(n) for n in numbers):
+            items = "; ".join(f'L{n} "{t[:28]}"' for n, t in entries[:5])
+            action = (
+                f"list the cluttering elements ({items}), then eliminate them or move them to a tooltip"
+                if uses_tooltips
+                else f"list the cluttering elements ({items}), then eliminate them or shorten to a label"
+            )
             out.append(Finding(rel, start, "copy", f"{name}: {len(numbers)} explanatory texts on one screen "
-                               f"(limit {C.density}; lines {', '.join(map(str, numbers[:6]))})",
-                               "one explanation per screen; the rest becomes a short label or goes"))
+                               f"(limit {C.density}; lines {', '.join(map(str, numbers[:6]))})", action))
 
 
 # Tooltip: measured whole in balloon lines (tooltip_line_chars per line). More than tooltip_lines

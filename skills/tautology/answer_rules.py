@@ -16,10 +16,11 @@ def scan_message(text, label="answer"):
             continue
         if not fence and not line.lstrip().startswith("|"):
             prose.append(line)
-    body = "\n".join(prose)
+    body = re.sub(r"\]\([^)]*\)", "]", "\n".join(prose))
     for number, line in enumerate(prose, 1):
+        line_clean = re.sub(r"\]\([^)]*\)", "]", line)
         # A quotation in quotes or backticks (a finding, an app text) is not the agent speaking.
-        text_checks(label, number, re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " ", line), out)
+        text_checks(label, number, re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " ", line_clean), out)
     sentences = Counter(plain(s) for s in re.split(r"(?<=[.!?])\s+|\n+", body) if len(plain(s).split()) >= 6)
     for sentence, count in sentences.items():
         if count >= 2:

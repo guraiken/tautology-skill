@@ -36,6 +36,17 @@ CONFIG_FILE = PROJECT_DIR / "config.json"
 ACCEPTED_FILE = PROJECT_DIR / "accepted.txt"
 SELFTEST = False
 
+
+def use_repo(repo):
+    """Switches settings and accepted-store target to repo (needed when hooks launch from plugin bin/)."""
+    global REPO, PROJECT_DIR, CONFIG_FILE, ACCEPTED_FILE, _ACCEPTED
+    REPO = Path(repo).resolve()
+    PROJECT_DIR = project_subdir(REPO, "tautology")
+    CONFIG_FILE = PROJECT_DIR / "config.json"
+    ACCEPTED_FILE = PROJECT_DIR / "accepted.txt"
+    _ACCEPTED = None
+    C.load(CONFIG_FILE)
+
 JS = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}
 JSX = {".jsx", ".tsx"}
 CODE = {".py", ".rs", ".ps1", ".bat", ".cmd", ".sh"} | JS
@@ -171,7 +182,7 @@ KIND_PATTERNS = [  # (kind, case-insensitive, default patterns)
                       r"<button\b", r"<(Button|MenuItem|Tab|option)\b"]),
     ("title", False, [r"<(h[1-4]|label|legend|th|Title|Heading)\b"]),
     ("hint", True, [r"tool_?tip", r"\bhint\(", r"placeholder", r"subtitle", r"descri", r"caption", r"\bhelp",
-                    r"\bnote\b"]),
+                    r"\bnote\b", r"\binfo\s*:"]),
     ("title", True, [r"\bsection\(", r"title", r"heading", r"\bheader", r"\blabel\(", r"QLabel", r"chip\(", r"badge"]),
     ("notice", True, [r"\b(progress|notice\w*|status|toast|Err|invalid|blocked|message)\b"]),
 ]
@@ -192,6 +203,19 @@ DEFAULTS = {
     "tooltip_lines": 2,
     "density": 5,              # explanatory texts per screen function
     "descriptive_words": 8,    # words from which a text explains instead of naming
+    "theme_paths": [],         # files or folders where palette/design tokens are defined
+    "design": {                # thresholds and token hints for design_audit.py
+        "max_container_depth": 3,
+        "max_cards": 6,
+        "max_dividers": 4,
+        "max_badges": 6,
+        "max_icons": 10,
+        "max_header_stack": 2,
+        "max_info_hints": 6,
+        "style_tokens": [],
+        "states_file": "",
+        "capture_command": "",
+    },
 }
 
 
@@ -241,6 +265,10 @@ class Settings:
         self.limits = {k: tuple(v) for k, v in raw["limits"].items()}
         self.line_chars, self.tooltip_lines = raw["tooltip_line_chars"], raw["tooltip_lines"]
         self.density, self.descriptive = raw["density"], raw["descriptive_words"]
+        self.theme_paths = tuple(raw["theme_paths"])
+        design = dict(DEFAULTS["design"])
+        design.update(raw.get("design") or {})
+        self.design = design
         extra = raw["kinds"]
         self.kinds = []
         for kind, nocase, patterns in KIND_PATTERNS:
@@ -248,7 +276,7 @@ class Settings:
             self.kinds.append((kind, re.compile(("(?i)" if nocase else "") + "|".join(patterns + more))))
         calls = [r"setToolTip\(", r"\.tooltip\("] + raw["tooltip_calls"]
         self.tooltip_call = re.compile("|".join(calls))
-        self.hint_raw = re.compile("(?i)" + "|".join([r"tool_?tip"] + raw["tooltip_calls"]))
+        self.hint_raw = re.compile("(?i)" + "|".join([r"tool_?tip", r"-info[\"']"] + raw["tooltip_calls"]))
         self.tooltip_second = tuple(raw["tooltip_second_arg"])
         self.placed = re.compile("(?i)" + "|".join([r"child\(", "hint", "descri", "subtitle", "caption", "note"]
                                                    + raw["placement_calls"]))
@@ -585,4 +613,7 @@ def ignored_lines(lines):
 
 def own_cases(path, rel):
     """The skills' own bad-on-purpose cases stay out of every scan but the selftest."""
-    return not SELFTEST and (path.resolve().is_relative_to(CASES) or re.search(r"(^|/)\.claude/skills/[^/]+/cases/", rel))
+    return not SELFTEST and (
+        path.resolve().is_relative_to(CASES)
+        or bool(re.search(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/cases/", rel))
+    )

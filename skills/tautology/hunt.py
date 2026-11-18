@@ -33,6 +33,21 @@ from answer_rules import *  # noqa: E402,F403
 COMPETENCIES = {"copy": "copy", "code": "code", "tests": "test", "answer": "answer"}
 
 
+def sibling_model_constants(path):
+    """String constants in a sibling model.rs of the same screen folder (e.g. HINT_IDLE)."""
+    if path.suffix.lower() != ".rs" or path.name == "model.rs":
+        return {}
+    model = path.parent / "model.rs"
+    if not model.is_file() or model.stat().st_size > MAX_BYTES:
+        return {}
+    out = {}
+    for line in model.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r'^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Z0-9_]+)\s*:\s*&str\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', line)
+        if m and is_prose(m.group(2)):
+            out[m.group(1)] = m.group(2)
+    return out
+
+
 def scan_file(path, only=None):
     """only: lines to look at (None = all). Returns the findings, minus the accepted ones."""
     return [f for f in raw_scan_file(path, only) if not accepted(f)]
@@ -63,6 +78,7 @@ def raw_scan_file(path, only=None):
     test_from = next((i for i, l in enumerate(lines, 1) if l.strip() == "#[cfg(test)]"), None) if suffix == ".rs" else None
     seen_literals = defaultdict(list)
     ui_literals = []  # (line number, text, code line)
+    model_consts = sibling_model_constants(path) if ui else {}
     for number, line in enumerate(lines, 1):
         if not look(number):
             continue
@@ -72,14 +88,20 @@ def raw_scan_file(path, only=None):
             check_comment_restates_code(rel, number, comment, lines, suffix, out)
             continue
         in_test = test or (test_from is not None and number >= test_from)
+        row = table_row(line, suffix)
         for literal in literals(line, suffix):
             if not is_prose(literal):
                 continue
             text_checks(rel, number, literal, out)
-            if not in_test:
+            if not in_test and not row and not OFF_SCREEN.search(line):
                 seen_literals[plain(literal)].append(number)
             if ui and not in_test and on_screen(line, literal):
                 ui_literals.append((number, literal, line))
+        if ui and not in_test and model_consts:
+            for m in re.finditer(r"\bmodel::([A-Z0-9_]+)\b", strip_literals(line)):
+                const_text = model_consts.get(m.group(1))
+                if const_text:
+                    ui_literals.append((number, const_text, line))
         for ident in IDENT_RE.findall(strip_literals(line)):
             parts = tokens(ident)
             if any(a == b and len(a) >= 3 and not a.isdigit() for a, b in zip(parts, parts[1:])):
@@ -98,12 +120,14 @@ def raw_scan_file(path, only=None):
             if any(re.search(LABEL_RE.format(target), other) for other in window):
                 out.append(Finding(rel, number, "copy", f"tooltip shows the same {m.group(1)} as the label",
                                    "drop the tooltip, or say something the control does not show"))
+    repeated = set()
     for norm, numbers in seen_literals.items():
         # Code organisation, not too much on screen: only in the whole-file scan (--all), not in the hook.
-        if only is None and len(numbers) >= 2 and len(norm.split()) >= 4:
+        if only is None and len(numbers) >= 3 and len(norm.split()) >= 4:
+            repeated.add(norm)
             out.append(Finding(rel, numbers[1], "code", f'the same text appears {len(numbers)}x (lines '
                                f'{", ".join(map(str, numbers[:4]))})', "one constant or one text"))
-    near_repeats(rel, ui_literals, out, lines, whole=only is None)
+    near_repeats(rel, ui_literals, out, lines, whole=only is None, repeated=repeated)
     if ui:
         bloat_checks(rel, lines, suffix, look, skip, test_from, out)
     if suffix == ".rs" and (test or test_from):
@@ -117,10 +141,20 @@ def raw_scan_file(path, only=None):
 
 
 
+def expand_paths(paths):
+    out = []
+    for raw in paths:
+        path = Path(raw).resolve()
+        if path.is_dir():
+            out += sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in CODE | TEXT)
+        else:
+            out.append(path)
+    return out
+
+
 def scan(paths, whole=False):
     found = []
-    for path in paths:
-        path = Path(path).resolve()
+    for path in expand_paths(paths):
         only = None if whole else added_lines(path)
         if only is not None and not only:
             continue
