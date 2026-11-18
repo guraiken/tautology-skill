@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh bin/py.sh skills/tautology/hooks/edit_gate.py || bin\\py.cmd skills/tautology/hooks/edit_gate.py"
+            "command": "cd bin && (py.cmd ../skills/tautology/hooks/edit_gate.py 2>nul || sh py.sh ../skills/tautology/hooks/edit_gate.py)"
           }
         ]
       }
@@ -14,13 +14,13 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "sh bin/py.sh skills/modular/hooks/modular_gate.py || bin\\py.cmd skills/modular/hooks/modular_gate.py"
+        "command": "cd bin && (py.cmd ../skills/modular/hooks/modular_gate.py 2>nul || sh py.sh ../skills/modular/hooks/modular_gate.py)"
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "sh bin/py.sh skills/tautology/hooks/stop_gate.py || bin\\py.cmd skills/tautology/hooks/stop_gate.py",
+        "command": "cd bin && (py.cmd ../skills/tautology/hooks/stop_gate.py 2>nul || sh py.sh ../skills/tautology/hooks/stop_gate.py)",
         "timeout": 90
       }
     ]
