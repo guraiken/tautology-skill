@@ -10,18 +10,31 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+SCANNED_SUFFIXES = {
+    ".py", ".rs", ".ps1", ".bat", ".cmd", ".sh",
+    ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".md", ".txt",
+}
+MAX_BYTES = 1_500_000
 
 
 def state_dir(repo):
-    """Per-session state under the git dir (never committed); .tautology-state outside git."""
-    git = Path(repo, ".git")
+    """Per-session state under the git dir (never committed); system temp dir outside git."""
+    repo_path = Path(repo).resolve()
+    git = repo_path / ".git"
     if git.is_dir():
         path = git / "tautology"
     else:
-        out = subprocess.run(["git", "rev-parse", "--git-path", "tautology"], cwd=repo, capture_output=True,
+        out = subprocess.run(["git", "rev-parse", "--git-path", "tautology"], cwd=repo_path, capture_output=True,
                              text=True).stdout.strip()
-        path = Path(repo, out) if out else Path(repo, ".tautology-state")
+        if out:
+            path = (repo_path / out).resolve()
+        else:
+            key = hashlib.sha1(str(repo_path).lower().encode()).hexdigest()[:16]
+            path = Path(tempfile.gettempdir()) / "tautology-state" / key
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -66,6 +79,23 @@ def new_lines(before, path):
     return lines
 
 
+def should_track(repo, source):
+    """Only track scanned text/code files inside the repository within the size limit (never .env or external files)."""
+    try:
+        resolved = source.resolve()
+        root = Path(repo).resolve()
+    except OSError:
+        return False
+    if not resolved.is_relative_to(root):
+        return False
+    name = resolved.name.lower()
+    if name == ".env" or name.startswith(".env.") or resolved.suffix.lower() not in SCANNED_SUFFIXES:
+        return False
+    if resolved.is_file() and resolved.stat().st_size > MAX_BYTES:
+        return False
+    return True
+
+
 def main():
     payload = json.load(sys.stdin)
     target = target_of(payload)
@@ -73,11 +103,16 @@ def main():
         if is_antigravity(payload):
             print('{"decision": "allow"}')
         return 0
-    state, session = state_dir(repo_of(payload)), session_of(payload)
+    repo = repo_of(payload)
+    source = Path(target)
+    if not should_track(repo, source):
+        if is_antigravity(payload):
+            print('{"decision": "allow"}')
+        return 0
+    state, session = state_dir(repo), session_of(payload)
     snap = snapshot_of(state, session, target)
     if not snap.exists():  # first edit of the file in this session: copy and note
         snap.parent.mkdir(parents=True, exist_ok=True)
-        source = Path(target)
         snap.write_bytes(source.read_bytes() if source.is_file() else b"")
         with (state / f"{session}.files").open("a", encoding="utf-8") as handle:
             handle.write(str(source.resolve()) + "\n")

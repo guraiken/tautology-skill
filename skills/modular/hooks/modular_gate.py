@@ -18,6 +18,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve()
 SKILL = HERE.parents[1]
+EDIT_GATE = SKILL.parent / "tautology" / "hooks" / "edit_gate.py"
 REFACTOR = re.compile(r"(?i)\b(refactor\w*|extract\w*|moduli[sz]\w*|reorgani[sz]\w*|componenti[sz]\w*|"
                       r"refator\w*|extra(ir|ia|ção|cao)\w*|modulariz\w*|reorganiz\w*|componentiz\w*)")
 
@@ -39,14 +40,12 @@ def main():
         return 0
     workspace = (payload.get("workspacePaths") or [None])[0]
     repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or workspace or ".").resolve()
-    git = repo / ".git"
-    state = git / "tautology" if git.is_dir() else repo / ".tautology-state"
+    state = load("edit_gate", EDIT_GATE).state_dir(repo)
     raw_session = payload.get("session_id") or payload.get("conversationId") or "session"
     session = "".join(c for c in str(raw_session) if c.isalnum() or c in "-_")[:80]
     flag = state / f"{session}.refactor"
     prompt = payload.get("prompt") or payload.get("lastUserInput") or ""
     if REFACTOR.search(prompt):  # every request passes here: no detector loaded
-        state.mkdir(parents=True, exist_ok=True)
         flag.write_text("1", encoding="utf-8")
     elif flag.exists():
         flag.unlink()

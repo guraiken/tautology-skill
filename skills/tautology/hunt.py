@@ -205,6 +205,14 @@ def hook_selftest():
         code, _ = hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(repo / "missing" / "x.rs")})
         if code != 0:
             problems.append(f"PreToolUse on a new file exited {code}, expected 0")
+        outside = Path(tempfile.gettempdir()) / "tautology-outside-secret.py"
+        env_file = repo / ".env"
+        env_file.write_text("SECRET=1\n", encoding="utf-8")
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(outside)})
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(env_file)})
+        tracked_files = (repo / ".git" / "tautology" / "selftest.files").read_text(encoding="utf-8")
+        if "tautology-outside-secret" in tracked_files or ".env" in tracked_files:
+            problems.append("edit_gate tracked an external or .env file")
 
         # Antigravity hook protocol (camelCase payload, JSON on stdout, exit 0)
         agy_transcript = repo / "transcript.jsonl"
