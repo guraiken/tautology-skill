@@ -20,7 +20,8 @@ def scan_message(text, label="answer"):
     for number, line in enumerate(prose, 1):
         line_clean = re.sub(r"\]\([^)]*\)", "]", line)
         # A quotation in quotes or backticks (a finding, an app text) is not the agent speaking.
-        text_checks(label, number, re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " ", line_clean), out)
+        # Keep a non-word separator so adjacent words around inline code do not look doubled.
+        text_checks(label, number, re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " | ", line_clean), out)
     sentences = Counter(plain(s) for s in re.split(r"(?<=[.!?])\s+|\n+", body) if len(plain(s).split()) >= 6)
     for sentence, count in sentences.items():
         if count >= 2:

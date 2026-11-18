@@ -48,12 +48,12 @@ def sibling_model_constants(path):
     return out
 
 
-def scan_file(path, only=None):
+def scan_file(path, only=None, include_bloat=True):
     """only: lines to look at (None = all). Returns the findings, minus the accepted ones."""
-    return [f for f in raw_scan_file(path, only) if not accepted(f)]
+    return [f for f in raw_scan_file(path, only, include_bloat=include_bloat) if not accepted(f)]
 
 
-def raw_scan_file(path, only=None):
+def raw_scan_file(path, only=None, include_bloat=True):
     rel = relative(path)
     suffix = path.suffix.lower()
     if suffix not in CODE | TEXT or C.skip_dirs & set(Path(rel).parts) or not path.is_file():
@@ -128,7 +128,7 @@ def raw_scan_file(path, only=None):
             out.append(Finding(rel, numbers[1], "code", f'the same text appears {len(numbers)}x (lines '
                                f'{", ".join(map(str, numbers[:4]))})', "one constant or one text"))
     near_repeats(rel, ui_literals, out, lines, whole=only is None, repeated=repeated)
-    if ui:
+    if ui and include_bloat:
         bloat_checks(rel, lines, suffix, look, skip, test_from, out)
     if suffix == ".rs" and (test or test_from):
         rust_test_checks(rel, lines, 1 if test else test_from, look, out)
@@ -152,13 +152,23 @@ def expand_paths(paths):
     return out
 
 
-def scan(paths, whole=False):
+def raw_findings_for(path):
+    return raw_scan_file(path, only=None) + [
+        Finding(r, n, "copy", f'new UI text "{t}"', "")
+        for r, n, t, _ in new_ui_texts(path, only=None, keep_accepted=True)
+    ]
+
+
+def scan(paths, whole=False, prune=False):
+    expanded = expand_paths(paths)
     found = []
-    for path in expand_paths(paths):
+    for path in expanded:
         only = None if whole else added_lines(path)
         if only is not None and not only:
             continue
         found += scan_file(path, only)
+    if prune:
+        core.prune_paths(expanded, raw_findings_for, "hunt.py")
     return found
 
 
@@ -217,9 +227,31 @@ def hook_selftest():
                                  text=True, encoding="utf-8", env=env, cwd=repo)
             return run.returncode, run.stderr
 
+        # Default lean Stop hook: skips chat-only turns with no edited files, and catches objective tautologies
+        # without blocking on bloat/New UI texts unless opted in (or in debloat-design mode).
+        if scan_message("O trecho deriva do `id` do bloco."):
+            problems.append("scan_message false positive on doubled word separated by inline code")
+        code, report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        if code != 0 or report:
+            problems.append(f"default Stop without edited files exited {code}, expected 0")
         hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(target)})
         target.parent.mkdir(parents=True)
         target.write_text((CASES / "app/src/explicacoes.rs").read_text(encoding="utf-8"), encoding="utf-8")
+        code, lean_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        if code != 2 or "says the same as" not in lean_report:
+            problems.append(f"default lean Stop missed objective tautology: code={code} {lean_report!r}")
+        for noise in ("is wordy", "text with 3 sentences", "return back", "New UI texts"):
+            if noise in lean_report:
+                problems.append(f"default lean Stop emitted opt-in noise {noise!r}")
+
+        # Opt-in full hook mode (bloat + New UI texts + chat answer scan)
+        cfg_path = repo / ".claude" / "tautology" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg.update({"hook_scan_answer": True, "hook_review_new_ui_texts": True, "hook_bloat": True})
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        shown_file = repo / ".git" / "tautology" / "selftest.shown"
+        if shown_file.is_file():
+            shown_file.unlink()
         code, report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
         if code != 2:
             problems.append(f"Stop with a new finding exited {code}, expected 2")
@@ -236,6 +268,40 @@ def hook_selftest():
         code, _ = hook("stop_gate.py", "Stop", transcript_path=str(transcript), stop_hook_active=True)
         if code != 0:
             problems.append(f"stop_hook_active exited {code}, expected 0")
+        ui_ts = repo / "app" / "src" / "Panel.tsx"
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(ui_ts)})
+        ui_ts.write_text(
+            'import React from "react"\n'
+            'const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches\n'
+            'export const Panel = () => <div><span>Order saved safely</span></div>\n',
+            encoding="utf-8",
+        )
+        code, ui_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        if "prefers-reduced-motion" in ui_report:
+            problems.append("stop_gate flagged window.matchMedia argument as New UI text")
+        ui_lines = [l for l in ui_report.splitlines() if '[copy] new UI text "Order saved safely"' in l]
+        if not ui_lines:
+            problems.append(f"New UI texts missing --accept-compatible line:\n{ui_report}")
+        else:
+            for _ in range(2):
+                acc = subprocess.run([sys.executable, str(HERE / "hunt.py"), "--accept", ui_lines[0], "--reason", "valid copy"],
+                                     capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
+                if acc.returncode != 0:
+                    problems.append(f"hunt.py --accept rejected New UI texts line: {acc.stdout}{acc.stderr}")
+            acc_rows = [l for l in (repo / ".claude" / "tautology" / "accepted.txt").read_text(encoding="utf-8").splitlines()
+                        if l and not l.startswith("#")]
+            if len(acc_rows) != 1:
+                problems.append(f"hunt.py --accept duplicated entry in accepted.txt: {acc_rows!r}")
+            git_st = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+            if "accepted.txt" in git_st:
+                problems.append(f"accepted.txt was not auto-ignored in git status: {git_st!r}")
+            ui_ts.write_text("export const Panel = () => <div />\n", encoding="utf-8")
+            hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+            if (repo / ".claude" / "tautology" / "accepted.txt").exists():
+                problems.append("stop_gate did not delete resolved accepted.txt")
+            excl = repo / ".git" / "info" / "exclude"
+            if excl.is_file() and "accepted.txt" in excl.read_text(encoding="utf-8"):
+                problems.append("stop_gate did not clean accepted.txt from .git/info/exclude")
         code, _ = hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(repo / "missing" / "x.rs")})
         if code != 0:
             problems.append(f"PreToolUse on a new file exited {code}, expected 0")
@@ -307,7 +373,7 @@ def main():
         if not wanted:
             print(f"--only takes: {', '.join(COMPETENCIES)}")
             return 2
-    found = scan(changed_files() if args.diff else args.files, whole=args.all)
+    found = scan(changed_files() if args.diff else args.files, whole=args.all, prune=args.all and not args.diff and not wanted and not args.rates)
     if args.rates:
         rates(found)
         return 0

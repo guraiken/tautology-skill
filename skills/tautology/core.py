@@ -183,7 +183,7 @@ KIND_PATTERNS = [  # (kind, case-insensitive, default patterns)
     ("title", False, [r"<(h[1-4]|label|legend|th|Title|Heading)\b"]),
     ("hint", True, [r"tool_?tip", r"\bhint\(", r"placeholder", r"subtitle", r"descri", r"caption", r"\bhelp",
                     r"\bnote\b", r"\binfo\s*:"]),
-    ("title", True, [r"\bsection\(", r"title", r"heading", r"\bheader", r"\blabel\(", r"QLabel", r"chip\(", r"badge"]),
+    ("title", True, [r"\bsection\(", r"(?<!::)\btitle\b", r"heading", r"\bheader", r"\blabel\(", r"QLabel", r"chip\(", r"badge"]),
     ("notice", True, [r"\b(progress|notice\w*|status|toast|Err|invalid|blocked|message)\b"]),
 ]
 DEFAULTS = {
@@ -203,6 +203,9 @@ DEFAULTS = {
     "tooltip_lines": 2,
     "density": 5,              # explanatory texts per screen function
     "descriptive_words": 8,    # words from which a text explains instead of naming
+    "hook_scan_answer": False,         # Stop hook: scan the agent's chat answer (opt-in to avoid noisy turns)
+    "hook_review_new_ui_texts": False, # Stop hook: list every new UI string (auto-on during debloat-design)
+    "hook_bloat": False,               # Stop hook: run length/wordy/density checks (always on in CLI & debloat-design)
     "theme_paths": [],         # files or folders where palette/design tokens are defined
     "design": {                # thresholds and token hints for design_audit.py
         "max_container_depth": 3,
@@ -265,6 +268,9 @@ class Settings:
         self.limits = {k: tuple(v) for k, v in raw["limits"].items()}
         self.line_chars, self.tooltip_lines = raw["tooltip_line_chars"], raw["tooltip_lines"]
         self.density, self.descriptive = raw["density"], raw["descriptive_words"]
+        self.hook_scan_answer = bool(raw.get("hook_scan_answer", False))
+        self.hook_review_new_ui_texts = bool(raw.get("hook_review_new_ui_texts", False))
+        self.hook_bloat = bool(raw.get("hook_bloat", False))
         self.theme_paths = tuple(raw["theme_paths"])
         design = dict(DEFAULTS["design"])
         design.update(raw.get("design") or {})
@@ -304,7 +310,7 @@ JS_STR = re.compile(r"""(["'`])((?:(?!\1)[^\\\n]|\\.){3,})\1""")
 # Strings JS uses as code, not as text on screen: CSS class, selector, event, module, technical attribute.
 JS_CODE_ARG = re.compile(r"""(?:className|class|classList\.\w+|querySelector(?:All)?|getElementById|addEventListener|"""
                          r"""import|from|require|type|id|key|href|src|role|name|rel|target|method|mode|"""
-                         r"""data-[\w-]+|for|htmlFor|style|matches|closest)\s*[=(:]?\s*\{?\s*$""")
+                         r"""data-[\w-]+|for|htmlFor|style|matches|matchMedia|closest)\s*[=(:]?\s*\{?\s*$""")
 IDENT_RE = re.compile(r"(?<![\w])[A-Za-z_][A-Za-z0-9_]*")
 NOT_PROSE = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|WHERE|FROM|PRAGMA)\b|::|\(\?|\\\\|^\s*[#.]?[\w-]+\s*\{|\d+px"
                        r"|[#.][\w-]+\s*[\[,>.:]|\[[\w-]+[\]=*^$~|]|:(is|not|has|nth-\w+)\("
@@ -370,22 +376,156 @@ def accepted(finding):
 FINDING_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+) \[(?P<kind>[^\]]+)\] (?P<problem>.+?)(?: -> .*)?$")
 
 
-def accept(finding_line, reason, store=None, tool="hunt.py"):
-    """Records a judged false positive; the hook and --all stop showing it, for every session and agent."""
+def _git_exclude_file(repo):
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo, capture_output=True, text=True)
+    if top.returncode != 0 or not top.stdout.strip():
+        return None
+    out = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=repo, capture_output=True, text=True)
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    exclude = Path(out.stdout.strip())
+    return exclude if exclude.is_absolute() else (Path(repo) / exclude).resolve()
+
+
+def _repo_rel(path, repo):
+    try:
+        return Path(path).resolve().relative_to(Path(repo).resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def ensure_git_ignored(path, repo=None):
+    """Adds a tool-created path to local .git/info/exclude when inside a git repo and not yet ignored."""
+    base = Path(repo or REPO).resolve()
+    rel = _repo_rel(path, base)
+    if not rel:
+        return
+    if subprocess.run(["git", "check-ignore", "-q", "--", rel], cwd=base, capture_output=True).returncode == 0:
+        return
+    exclude = _git_exclude_file(base)
+    if not exclude:
+        return
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    lines = exclude.read_text(encoding="utf-8", errors="replace").splitlines() if exclude.is_file() else []
+    if rel not in lines:
+        text = "\n".join(lines).rstrip("\n")
+        exclude.write_text((text + "\n" if text else "") + rel + "\n", encoding="utf-8")
+
+
+def _remove_git_exclude(rel, repo):
+    exclude = _git_exclude_file(repo)
+    if not rel or not exclude or not exclude.is_file():
+        return
+    lines = exclude.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [line for line in lines if line != rel]
+    if len(kept) != len(lines):
+        exclude.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+
+
+def _cleanup_accepted_store(store, repo):
+    rel = _repo_rel(store, repo)
+    if store.is_file():
+        store.unlink()
+    _remove_git_exclude(rel, repo)
+    for folder in (store.parent, store.parent.parent):
+        if folder.is_dir() and folder.name in ("tautology", "modular", ".claude", ".agents"):
+            try:
+                if not any(folder.iterdir()):
+                    folder.rmdir()
+            except OSError:
+                break
+
+
+def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
+    """Records a judged false positive; auto-ignores accepted.txt locally via .git/info/exclude."""
+    global _ACCEPTED
     store = store or ACCEPTED_FILE
+    base = Path(repo or REPO).resolve()
     m = FINDING_LINE.match(finding_line.strip().lstrip("- "))
     if not m or not reason.strip():
         print(f'Use: --accept "<finding line, as {tool} printed it>" --reason "<why it is not a defect>"')
         return 2
     rule, subject = rule_and_subject(m.group("problem"))
-    entry = "\t".join([m.group("path"), rule, subject, reason.strip().replace("\t", " "),
-                       datetime.date.today().isoformat()])
+    target_path = m.group("path")
+    entry = "\t".join([target_path, rule, subject, reason.strip().replace("\t", " "),
+                       datetime.date.today().isoformat(), tool])
     store.parent.mkdir(parents=True, exist_ok=True)
-    existing = store.read_text(encoding="utf-8") if store.is_file() else (
-        f"# Judged false positives: path, rule, subject, reason, date. Written by {tool} --accept.\n")
-    store.write_text(existing.rstrip("\n") + "\n" + entry + "\n", encoding="utf-8")
-    print(f"accepted: {m.group('path')} [{rule}] {subject}")
+    header = f"# Judged false positives: path, rule, subject, reason, date, tool. Written by {tool} --accept."
+    if store.is_file():
+        raw_lines = store.read_text(encoding="utf-8").splitlines()
+        out_lines, replaced = [], False
+        for line in raw_lines:
+            parts = line.split("\t")
+            if len(parts) >= 4 and not line.startswith("#") and (parts[0], parts[1], parts[2]) == (target_path, rule, subject):
+                if not replaced:
+                    out_lines.append(entry)
+                    replaced = True
+                continue
+            out_lines.append(line)
+        if not replaced:
+            out_lines.append(entry)
+        store.write_text("\n".join(out_lines).rstrip("\n") + "\n", encoding="utf-8")
+    else:
+        store.write_text(header + "\n" + entry + "\n", encoding="utf-8")
+    _ACCEPTED = None
+    ensure_git_ignored(store, repo=base)
+    print(f"accepted: {target_path} [{rule}] {subject}")
     return 0
+
+
+def prune_accepted(scanned_paths, raw_findings, tool, store=None, repo=None):
+    """Drops resolved or deleted-file entries from accepted.txt; removes the file and its ignore entry when empty."""
+    global _ACCEPTED
+    if SELFTEST:
+        return
+    store = store or ACCEPTED_FILE
+    if not store.is_file():
+        return
+    base = Path(repo or REPO).resolve()
+    entries = load_accepted(store)
+    if not entries:
+        _ACCEPTED = None
+        _cleanup_accepted_store(store, base)
+        return
+    scanned = set(scanned_paths)
+    live = {(f.path, f.rule, f.subject) for f in raw_findings}
+    modular_store = store.parent.name == "modular"
+    kept = []
+    for parts in entries:
+        entry_path, entry_rule, entry_subject = parts[0], parts[1], parts[2]
+        if not (base / entry_path).is_file():
+            continue
+        owner = parts[5] if len(parts) >= 6 else (tool if modular_store else "")
+        if entry_path in scanned and owner == tool and (entry_path, entry_rule, entry_subject) not in live:
+            continue
+        kept.append(parts)
+    if len(kept) == len(entries):
+        ensure_git_ignored(store, repo=base)
+        return
+    _ACCEPTED = None
+    if not kept:
+        _cleanup_accepted_store(store, base)
+        return
+    header = f"# Judged false positives: path, rule, subject, reason, date, tool. Written by {tool} --accept.\n"
+    store.write_text(header + "\n".join("\t".join(p) for p in kept) + "\n", encoding="utf-8")
+    ensure_git_ignored(store, repo=base)
+
+
+def prune_paths(paths, raw_fn, tool, store=None, repo=None):
+    """Scans whole files in paths only when an accepted.txt store exists, pruning resolved findings."""
+    store = store or ACCEPTED_FILE
+    if SELFTEST or not store.is_file():
+        return
+    base = Path(repo or REPO).resolve()
+    raw_findings = []
+    scanned = []
+    for raw in paths:
+        path = Path(raw).resolve()
+        rel = _repo_rel(path, base) or relative(path)
+        scanned.append(rel)
+        if path.is_file():
+            raw_findings += raw_fn(path)
+    prune_accepted(scanned, raw_findings, tool, store=store, repo=base)
 
 
 def compare_expected(found, expected_file, record=False):

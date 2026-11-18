@@ -70,26 +70,72 @@ def command(*args):
     return " ".join(f'"{a}"' if " " in str(a) else str(a) for a in (Path(sys.executable).as_posix(), *args))
 
 
-def stop_report(payload, repo, session, state):
+def _config_flag(repo, key, default=False):
+    """Lightweight JSON read so fast-path Stop hooks can skip importing heavy modules."""
+    for folder in (".agents", ".claude"):
+        cfg = Path(repo) / folder / "tautology" / "config.json"
+        if cfg.is_file():
+            try:
+                return bool(json.loads(cfg.read_text(encoding="utf-8")).get(key, default))
+            except (OSError, ValueError):
+                return default
+    return default
+
+
+def _edited_files(state, session, repo):
+    edited = state / f"{session}.files"
+    if not edited.is_file():
+        return []
+    root = repo.resolve()
+    files = [Path(p) for p in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if p]
+    return [p for p in files if p.is_file() and p.is_relative_to(root)]
+
+
+def _has_test_candidate(files):
+    for path in files:
+        name = path.name.lower()
+        parts = {p.lower() for p in path.parts}
+        if ({"tests", "test", "__tests__"} & parts
+                or name.startswith("test_")
+                or name.endswith(("_test.py", "_test.rs", ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+                                  ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"))):
+            return True
+        if path.suffix.lower() == ".rs":
+            try:
+                if "#[cfg(test)]" in path.read_text(encoding="utf-8", errors="replace"):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def stop_report(payload, repo, session, state, files=None, design_mode=False):
     """The text that sends the answer back to the agent, or None when nothing new was found."""
-    edited, shown = state / f"{session}.files", state / f"{session}.shown"
+    shown = state / f"{session}.shown"
+    if files is None:
+        files = _edited_files(state, session, repo)
+    if not files and not _config_flag(repo, "hook_scan_answer", False):
+        return None
     sys.path.insert(0, str(SKILL))
     hunt = load("hunt", SKILL / "hunt.py")
     os.chdir(repo)
     hunt.core.use_repo(repo)
-    files = []
-    if edited.is_file():
-        files = [Path(p) for p in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if p]
     findings, review = [], []
     root = repo.resolve()
-    for path in (p for p in files if p.is_file() and p.is_relative_to(root)):
+    include_bloat = design_mode or hunt.C.hook_bloat
+    review_ui = design_mode or hunt.C.hook_review_new_ui_texts
+    for path in files:
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else hunt.added_lines(path)
         if only is None or only:
-            findings += hunt.scan_file(path, only)
-            review += hunt.new_ui_texts(path, only)
-    transcript = payload.get("transcript_path") or payload.get("transcriptPath") or ""
-    findings += hunt.scan_message(last_answer(transcript))
+            findings += hunt.scan_file(path, only, include_bloat=include_bloat)
+            if review_ui:
+                review += hunt.new_ui_texts(path, only)
+    if files:
+        hunt.core.prune_paths(files, hunt.raw_findings_for, "hunt.py", repo=root)
+    if hunt.C.hook_scan_answer:
+        transcript = payload.get("transcript_path") or payload.get("transcriptPath") or ""
+        findings += hunt.scan_message(last_answer(transcript))
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keys = {hashlib.sha1(f.key().encode()).hexdigest()[:16]: f for f in findings}
     new = [f for k, f in keys.items() if k not in before]
@@ -113,11 +159,12 @@ def stop_report(payload, repo, session, state):
                       "the control already shows, or holds more than one idea:")
         for rel, n, text, near in new_texts[:LIMIT]:
             beside = "; ".join(f'"{t[:40]}"' for _, t in near[:4]) or "none"
-            report.append(f'- {rel}:{n} "{text}" (neighbours: {beside})')
-    report.append("Fix what is a tautology. Keep what is not, say why in one line, and record it: "
+            report.append(f'- {rel}:{n} [copy] new UI text "{text}" -> keep if distinct; neighbours: {beside}')
+    report.append("Fix what is a tautology. Keep what is not and record it silently with: "
                   + command((SKILL / "hunt.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"')
-                  + " (it holds for later sessions). In the answer, say only what changed: do not repeat the "
-                  "previous delivery.")
+                  + " (it holds for later sessions). Do not output internal plugin reasoning, hook details, "
+                  "or false-positive justifications in the chat; report only concrete changes made, and do "
+                  "not repeat the previous delivery.")
     return "\n".join(report)
 
 
@@ -134,16 +181,20 @@ def main():
         return 0
     repo = gate.repo_of(payload)
     session, state = gate.session_of(payload), gate.state_dir(repo)
-    reports = [stop_report(payload, repo, session, state)]
-    if MODULAR.is_file():
-        reports.append(load("modular_gate", MODULAR).stop_report(repo.resolve(), session, state, gate))
-    if (state / f"{session}.design").is_file() and DESIGN_AUDIT.is_file():
-        reports.append(load("design_audit", DESIGN_AUDIT).stop_report(repo.resolve(), session, state, gate))
-    if TEST_AUDIT.is_file():
-        reports.append(load("test_audit", TEST_AUDIT).stop_report(
-            repo.resolve(), session, state, gate,
-            only_new_tests=not (state / f"{session}.tests_audit").is_file(),
-        ))
+    files = _edited_files(state, session, repo)
+    design_mode = (state / f"{session}.design").is_file()
+    tests_mode = (state / f"{session}.tests_audit").is_file()
+    reports = [stop_report(payload, repo, session, state, files=files, design_mode=design_mode)]
+    if files:
+        if MODULAR.is_file():
+            reports.append(load("modular_gate", MODULAR).stop_report(repo.resolve(), session, state, gate))
+        if design_mode and DESIGN_AUDIT.is_file():
+            reports.append(load("design_audit", DESIGN_AUDIT).stop_report(repo.resolve(), session, state, gate))
+        if TEST_AUDIT.is_file() and (tests_mode or _has_test_candidate(files)):
+            reports.append(load("test_audit", TEST_AUDIT).stop_report(
+                repo.resolve(), session, state, gate,
+                only_new_tests=not tests_mode,
+            ))
     reports = [r for r in reports if r]
     if not reports:
         if agy:

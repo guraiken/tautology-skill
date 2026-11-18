@@ -12,9 +12,12 @@ Here it is **a defect in any form**: UI text, test, component, script or the age
 
 - **By itself, before the answer:** `hooks/edit_gate.py` (PreToolUse) keeps a copy of each file before the
   session's first edit; at the end of the answer `hooks/stop_gate.py` scans only the lines the session
-  changed, plus the answer itself, in one process (and the `modular` skill's copied-code search, when it
-  is installed next to this one). A new finding sends the answer back once with the list; a finding
-  already shown never blocks again.
+  changed (exiting immediately when no files were edited). By default, the automatic Stop hook reports
+  only objective tautologies (repeats, pleonasm, doubled words, self-confirming tests, comments restating
+  code) and skips chat-answer scanning, length/density bloat, and per-string `New UI texts` lists unless
+  enabled via `/tautology-debloat-design` or project settings (`hook_scan_answer`, `hook_bloat`,
+  `hook_review_new_ui_texts`). A new finding sends the answer back once; a finding already shown never
+  blocks again.
 - **By hand:** `python <skill dir>/hunt.py --diff` (`--all <file>` looks at the whole file; `--message <file>`
   looks at a text).
 - **By competency:** `/tautology:tautology copy` (or `code`, `tests`, `answer`, several with commas) runs
@@ -115,7 +118,8 @@ the table yet (add it to `synonyms` in the settings).
 **The agent's answer:**
 - The same sentence or passage twice, a closing summary that retells the body, "as said above". Say each
   thing once, where it is read first.
-- After a hook finding, say only what changed: do not rewrite the answer.
+- After a hook finding, report only concrete changes made: never print internal plugin reasoning, hook
+  details, or false-positive justifications in the chat, and do not rewrite the previous delivery.
 
 ## How to fix
 
@@ -131,7 +135,7 @@ the table yet (add it to `synonyms` in the settings).
 
 1. A quotation on purpose (an example, a list of what is searched for): `tautology: example` on the
    line, or the block between `tautology: off` and `tautology: on`.
-2. A finding that is not tautology: keep it, give the reason in **one line** in the answer and record it:
+2. A finding that is not tautology: keep it and record it silently (do not explain the false positive in chat):
 
    ```
    python <skill dir>/hunt.py --accept "<finding line>" --reason "<why>"

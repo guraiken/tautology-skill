@@ -62,6 +62,9 @@
   "tooltip_lines": 2,
   "density": 5,
   "descriptive_words": 8,
+  "hook_scan_answer": false,
+  "hook_review_new_ui_texts": false,
+  "hook_bloat": false,
   "theme_paths": [
     "src/theme/"
   ],

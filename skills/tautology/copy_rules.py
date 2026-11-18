@@ -159,7 +159,7 @@ def near_repeats(rel, ui_literals, out, lines=(), whole=False, repeated=()):
                                    "cut what repeats; a text that only repeats goes"))
 
 
-def new_ui_texts(path, only=None):
+def new_ui_texts(path, only=None, keep_accepted=False):
     """New UI texts with their neighbours (6 lines): the agent checks the paraphrase the word
     comparison misses. Returns [(rel, line, text, [(line, neighbour text)])]."""
     rel = relative(path)
@@ -182,6 +182,8 @@ def new_ui_texts(path, only=None):
     items = []
     for number, text in texts:
         if only is None or number in only:
+            if not keep_accepted and accepted(Finding(rel, number, "copy", f'new UI text "{text}"', "")):
+                continue
             near = [(n, t) for n, t in texts if abs(n - number) <= 6 and (n, t) != (number, text)]
             items.append((rel, number, text, near))
     return items
@@ -189,7 +191,7 @@ def new_ui_texts(path, only=None):
 
 # ------------------------------------------------------------------------ visual bloat
 # Too much text on screen is tautology too: the control, the icon and the context already say it.
-def text_kind(lines, number, line):
+def text_kind(lines, number, line, suffix=".rs"):
     """The text's kind, by the call that receives it: on the line itself or on the one that opens .child(...)."""
     for kind, pattern in C.kinds:
         if pattern.search(strip_literals(line)) or (kind == "hint" and C.hint_raw.search(line)):
@@ -206,6 +208,10 @@ def text_kind(lines, number, line):
                 continue
             for kind, pattern in C.kinds:
                 if pattern.search(strip_literals(above)) or (kind == "hint" and C.hint_raw.search(above)):
+                    if kind == "title":
+                        earlier = any(literals(lines[i], suffix) for i in range(back, number - 1))
+                        if earlier:
+                            return "hint"  # secondary string argument in a multi-line call (e.g. chip tooltip)
                     return kind
             if re.search(r"[(,{]\s*$", above) and not re.search(r"\b(?:div|h_flex|v_flex)\s*\(\s*$", above):
                 indent = depth
@@ -242,7 +248,7 @@ def bloat_checks(rel, lines, suffix, look, skip, test_from, out):
         for literal in literals(line, suffix):
             if not is_prose(literal) or not on_screen(line, literal):
                 continue
-            kind = text_kind(lines, number, line)
+            kind = text_kind(lines, number, line, suffix)
             body = PLACEHOLDER.sub("X", literal)
             if kind == "title" and (literals(line, suffix).index(literal) > 0 or len(sentences(body)) > 1
                                     or (body.rstrip().endswith(".") and len(body.split()) >= 4)):
