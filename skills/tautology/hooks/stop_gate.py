@@ -29,10 +29,16 @@ gate = load("edit_gate", HERE / "edit_gate.py")
 
 
 def last_answer(transcript):
-    """The agent's text after the user's last message."""
+    """The agent's text after the user's last message (Claude Code and Antigravity transcripts)."""
+    if not transcript:
+        return ""
     texts = []
+    path = Path(transcript)
+    full = path.with_name("transcript_full.jsonl")
+    if full.is_file():
+        path = full
     try:
-        lines = Path(transcript).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
     for raw in lines:
@@ -40,15 +46,20 @@ def last_answer(transcript):
             entry = json.loads(raw)
         except ValueError:
             continue
+        kind = entry.get("type")
         message = entry.get("message") or {}
         content = message.get("content")
-        if entry.get("type") == "user":
+        if kind == "user":
             real = isinstance(content, str) or any(
                 isinstance(c, dict) and c.get("type") == "text" for c in (content or []))
             if real:
                 texts = []
-        elif entry.get("type") == "assistant" and isinstance(content, list):
+        elif kind == "assistant" and isinstance(content, list):
             texts += [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+        elif kind == "USER_INPUT":
+            texts = []
+        elif kind == "PLANNER_RESPONSE" and isinstance(entry.get("content"), str):
+            texts.append(entry["content"])
     return "\n\n".join(t for t in texts if t.strip())
 
 
@@ -74,7 +85,8 @@ def stop_report(payload, repo, session, state):
         if only is None or only:
             findings += hunt.scan_file(path, only)
             review += hunt.new_ui_texts(path, only)
-    findings += hunt.scan_message(last_answer(payload.get("transcript_path", "")))
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath") or ""
+    findings += hunt.scan_message(last_answer(transcript))
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keys = {hashlib.sha1(f.key().encode()).hexdigest()[:16]: f for f in findings}
     new = [f for k, f in keys.items() if k not in before]
@@ -107,9 +119,15 @@ def stop_report(payload, repo, session, state):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     payload = json.load(sys.stdin)
-    if payload.get("hook_event_name") != "Stop" or payload.get("stop_hook_active"):
+    agy = gate.is_antigravity(payload)
+    reason = payload.get("terminationReason")
+    if (gate.event_of(payload) != "Stop" or payload.get("stop_hook_active") or payload.get("continuationActive")
+            or (reason and reason != "NO_TOOL_CALL")):
+        if agy:
+            print("{}")
         return 0
     repo = gate.repo_of(payload)
     session, state = gate.session_of(payload), gate.state_dir(repo)
@@ -118,8 +136,14 @@ def main():
         reports.append(load("modular_gate", MODULAR).stop_report(repo.resolve(), session, state, gate))
     reports = [r for r in reports if r]
     if not reports:
+        if agy:
+            print("{}")
         return 0
-    print("\n\n".join(reports), file=sys.stderr)
+    joined = "\n\n".join(reports)
+    if agy:
+        print(json.dumps({"decision": "continue", "reason": joined}, ensure_ascii=False))
+        return 0
+    print(joined, file=sys.stderr)
     return 2
 
 

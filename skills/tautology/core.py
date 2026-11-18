@@ -22,10 +22,16 @@ def find_repo():
     return Path(top).resolve() if top else Path.cwd().resolve()
 
 
+def project_subdir(repo, name):
+    """Per-project settings folder: .agents/<name> when present, otherwise .claude/<name>."""
+    agents = Path(repo) / ".agents" / name
+    return agents if agents.is_dir() else Path(repo) / ".claude" / name
+
+
 REPO = find_repo()
 HERE = Path(__file__).resolve().parent
 CASES = HERE / "cases"                                   # the hunt's own test cases (--selftest)
-PROJECT_DIR = REPO / ".claude" / "tautology"             # per-project settings and accepted findings
+PROJECT_DIR = project_subdir(REPO, "tautology")          # per-project settings and accepted findings
 CONFIG_FILE = PROJECT_DIR / "config.json"
 ACCEPTED_FILE = PROJECT_DIR / "accepted.txt"
 SELFTEST = False

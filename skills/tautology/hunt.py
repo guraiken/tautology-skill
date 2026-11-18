@@ -205,6 +205,34 @@ def hook_selftest():
         code, _ = hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(repo / "missing" / "x.rs")})
         if code != 0:
             problems.append(f"PreToolUse on a new file exited {code}, expected 0")
+
+        # Antigravity hook protocol (camelCase payload, JSON on stdout, exit 0)
+        agy_transcript = repo / "transcript.jsonl"
+        agy_transcript.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in [
+            {"type": "USER_INPUT", "content": "request"},
+            {"type": "PLANNER_RESPONSE", "content": answer},
+        ]) + "\n", encoding="utf-8")
+
+        def agy_hook(script, event, **extra):
+            payload = {"hookEventName": event, "conversationId": "agy-selftest", "cwd": str(repo), **extra}
+            run = subprocess.run([sys.executable, str(hooks / script)], input=json.dumps(payload), capture_output=True,
+                                 text=True, encoding="utf-8", cwd=repo)
+            return run.returncode, json.loads(run.stdout or "{}")
+
+        target2 = repo / "app" / "src" / "screen2.rs"
+        code, out = agy_hook("edit_gate.py", "PreToolUse", toolCall={"name": "edit_file", "args": {"Path": str(target2)}})
+        if code != 0 or out.get("decision") != "allow":
+            problems.append(f"Antigravity PreToolUse returned {code} {out!r}")
+        target2.write_text((CASES / "app/src/explicacoes.rs").read_text(encoding="utf-8"), encoding="utf-8")
+        code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), terminationReason="NO_TOOL_CALL")
+        if code != 0 or out.get("decision") != "continue" or "return back" not in out.get("reason", ""):
+            problems.append(f"Antigravity Stop with a new finding returned {code} {out!r}")
+        code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), terminationReason="NO_TOOL_CALL")
+        if code != 0 or out != {}:
+            problems.append(f"Antigravity repeated Stop returned {code} {out!r}, expected empty object")
+        code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), continuationActive=True)
+        if code != 0 or out != {}:
+            problems.append(f"Antigravity continuationActive returned {code} {out!r}, expected empty object")
     finally:
         shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:

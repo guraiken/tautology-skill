@@ -138,16 +138,18 @@ the table yet (add it to `synonyms` in the settings).
 
 ## Project settings
 
-`.claude/tautology/config.json` in the project (all keys optional; `config.example.json` lists them):
+`.claude/tautology/config.json` (or `.agents/tautology/config.json`) in the project (all keys optional;
+`config.example.json` lists them):
 `languages`, `ui_paths`, `test_paths`, `skip_dirs`, `sensitive_paths`, `synonyms`, `kinds`,
 `tooltip_calls`, `tooltip_second_arg`, `placement_calls`, `limits`, `tooltip_line_chars`,
 `tooltip_lines`, `density`, `descriptive_words`.
 
 ## Install
 
-Part of the `tautology` plugin: its hooks are registered when the plugin is enabled. Needs Python 3.10+
-(standard library only); `bin/py.sh` finds `python3`, `python` or `py -3`, and `TAUTOLOGY_PYTHON` overrides
-it. Session state lives in `.git/tautology/` of the project (never committed).
+Part of the `tautology` plugin (Claude Code and Google Antigravity): its hooks are registered when the
+plugin is enabled. Needs Python 3.10+ (standard library only); `bin/py.sh` (Unix) and `bin/py.cmd`
+(Windows) find `python3`, `python` or `py -3`, and `TAUTOLOGY_PYTHON` overrides it. Session state lives
+in `.git/tautology/` of the project (never committed).
 
 ## Cases and calibration
 

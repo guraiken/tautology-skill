@@ -26,12 +26,28 @@ def state_dir(repo):
     return path
 
 
+def is_antigravity(payload):
+    return "hookEventName" in payload
+
+
+def event_of(payload):
+    return payload.get("hook_event_name") or payload.get("hookEventName") or ""
+
+
 def session_of(payload):
-    return "".join(c for c in str(payload.get("session_id", "session")) if c.isalnum() or c in "-_")[:80]
+    raw = payload.get("session_id") or payload.get("conversationId") or "session"
+    return "".join(c for c in str(raw) if c.isalnum() or c in "-_")[:80]
 
 
 def repo_of(payload):
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or ".")
+    workspace = (payload.get("workspacePaths") or [None])[0]
+    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or workspace or ".")
+
+
+def target_of(payload):
+    tool_input = payload.get("tool_input") or (payload.get("toolCall") or {}).get("args") or {}
+    return (tool_input.get("file_path") or tool_input.get("notebook_path")
+            or tool_input.get("Path") or tool_input.get("TargetFile"))
 
 
 def snapshot_of(state, session, path):
@@ -52,9 +68,10 @@ def new_lines(before, path):
 
 def main():
     payload = json.load(sys.stdin)
-    tool_input = payload.get("tool_input") or {}
-    target = tool_input.get("file_path") or tool_input.get("notebook_path")
-    if payload.get("hook_event_name") != "PreToolUse" or not target:
+    target = target_of(payload)
+    if event_of(payload) != "PreToolUse" or not target:
+        if is_antigravity(payload):
+            print('{"decision": "allow"}')
         return 0
     state, session = state_dir(repo_of(payload)), session_of(payload)
     snap = snapshot_of(state, session, target)
@@ -64,6 +81,8 @@ def main():
         snap.write_bytes(source.read_bytes() if source.is_file() else b"")
         with (state / f"{session}.files").open("a", encoding="utf-8") as handle:
             handle.write(str(source.resolve()) + "\n")
+    if is_antigravity(payload):
+        print('{"decision": "allow"}')
     return 0
 
 
@@ -72,4 +91,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as error:  # a broken hook must never block an edit
         print(f"tautology edit_gate: {error}", file=sys.stderr)
+        print('{"decision": "allow"}')
         sys.exit(0)
