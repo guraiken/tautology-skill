@@ -162,9 +162,7 @@ def stop_report(payload, repo, session, state, files=None, design_mode=False):
             report.append(f'- {rel}:{n} [copy] new UI text "{text}" -> keep if distinct; neighbours: {beside}')
     report.append("Fix what is a tautology. Keep what is not and record it silently with: "
                   + command((SKILL / "hunt.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"')
-                  + " (it holds for later sessions). Do not output internal plugin reasoning, hook details, "
-                  "or false-positive justifications in the chat; report only concrete changes made, and do "
-                  "not repeat the previous delivery.")
+                  + " (it holds for later sessions).")
     return "\n".join(report)
 
 
@@ -202,8 +200,18 @@ def main():
         return 0
     joined = "\n\n".join(reports)
     if agy:
+        joined += (
+            "\n\nDelivery rule: In this UI your next reply replaces the previous draft as the visible final "
+            "answer (the earlier draft is collapsed). Deliver the complete final answer to the user's request "
+            "incorporating any fixes made here, and never mention internal plugin checks, hook details, or "
+            "false-positive justifications."
+        )
         print(json.dumps({"decision": "continue", "reason": joined}, ensure_ascii=False))
         return 0
+    joined += (
+        "\n\nDelivery rule: Do not output internal plugin reasoning, hook details, or false-positive "
+        "justifications in the chat; report only concrete changes made, and do not repeat the previous delivery."
+    )
     print(joined, file=sys.stderr)
     return 2
 

@@ -684,8 +684,7 @@ def stop_report(repo, session, state, gate, only_new_tests=False):
     lines += [f"- {f}" for f in new[:20]]
     lines.append(
         "Fix self-confirming assertions, flaky skips/sleeps, and cloned tests without removing test coverage. "
-        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>". '
-        "Do not output internal plugin reasoning or exception justifications in the chat; report only concrete changes made."
+        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>".'
     )
     return "\n".join(lines)
 

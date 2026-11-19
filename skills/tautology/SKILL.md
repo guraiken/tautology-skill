@@ -118,8 +118,10 @@ the table yet (add it to `synonyms` in the settings).
 **The agent's answer:**
 - The same sentence or passage twice, a closing summary that retells the body, "as said above". Say each
   thing once, where it is read first.
-- After a hook finding, report only concrete changes made: never print internal plugin reasoning, hook
-  details, or false-positive justifications in the chat, and do not rewrite the previous delivery.
+- After a hook finding, never print internal plugin reasoning, hook details, or false-positive
+  justifications in the chat. In Antigravity (where the previous draft is collapsed), deliver the complete
+  final answer incorporating any fixes; in Claude Code (where the previous message stays visible), report
+  only concrete changes made.
 
 ## How to fix
 

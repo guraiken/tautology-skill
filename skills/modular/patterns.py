@@ -476,8 +476,7 @@ def briefing(found, arch, trigger, created=()):
             "do not extract, tell the user. "
             + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
             + "If it is not a repetition to extract (coincidence, framework idiom), record it silently: "
-            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"')
-            + ". Do not output internal plugin reasoning or exception justifications in the chat; report only concrete changes made.")
+            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
     return "\n".join(lines)
 
 
