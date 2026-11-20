@@ -75,7 +75,7 @@ def raw_scan_file(path, only=None, include_bloat=True):
     test = is_test(rel)
     ui = is_ui(rel, source) and not test
     # Rust: the #[cfg(test)] module at the end repeats the messages on purpose, as expectations.
-    test_from = next((i for i, l in enumerate(lines, 1) if l.strip() == "#[cfg(test)]"), None) if suffix == ".rs" else None
+    test_from = rust_test_start(lines) if suffix == ".rs" else None
     seen_literals = defaultdict(list)
     ui_literals = []  # (line number, text, code line)
     model_consts = sibling_model_constants(path) if ui else {}
@@ -91,6 +91,10 @@ def raw_scan_file(path, only=None, include_bloat=True):
         row = table_row(line, suffix)
         for literal in literals(line, suffix):
             if not is_prose(literal):
+                # A one-word label or placeholder still names its field: "Email" against "Enter your email".
+                if (ui and not test and (LABEL_LINE.search(line) or PLACEHOLDER_ATTR.search(line))
+                        and on_screen(line, literal) and re.fullmatch(r"[^\W\d_][\w-]{1,30}", literal.strip())):
+                    ui_literals.append((number, literal, line))
                 continue
             text_checks(rel, number, literal, out)
             if not in_test and not row and not OFF_SCREEN.search(line):
@@ -109,7 +113,8 @@ def raw_scan_file(path, only=None, include_bloat=True):
                 break
         if number > 1 and look(number - 1):
             prev = lines[number - 2].strip()
-            if prev == line.strip() and len(prev) >= 12 and not prev.endswith(",") and not re.fullmatch(r"[\s{}()\[\];,]*(end|fi|done)?", prev):
+            # Same text at another indentation closes a different block (an except, then the function).
+            if lines[number - 2].rstrip() == line.rstrip() and len(prev) >= 12 and not prev.endswith(",") and not re.fullmatch(r"[\s{}()\[\];,]*(end|fi|done)?", prev):
                 out.append(Finding(rel, number, "code", "line identical to the previous one", "delete the copy"))
         if suffix == ".rs":
             rust_line_checks(rel, number, line, out)
@@ -128,8 +133,9 @@ def raw_scan_file(path, only=None, include_bloat=True):
             out.append(Finding(rel, numbers[1], "code", f'the same text appears {len(numbers)}x (lines '
                                f'{", ".join(map(str, numbers[:4]))})', "one constant or one text"))
     near_repeats(rel, ui_literals, out, lines, whole=only is None, repeated=repeated)
-    if ui and include_bloat:
-        bloat_checks(rel, lines, suffix, look, skip, test_from, out)
+    if ui:
+        bloat_checks(rel, lines, suffix, look, skip, test_from, out, full=include_bloat)
+        clutter_checks(rel, lines, suffix, look, skip, test_from, out)
     if suffix == ".rs" and (test or test_from):
         rust_test_checks(rel, lines, 1 if test else test_from, look, out)
     if suffix == ".py":
@@ -240,7 +246,7 @@ def hook_selftest():
         code, lean_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
         if code != 2 or "says the same as" not in lean_report:
             problems.append(f"default lean Stop missed objective tautology: code={code} {lean_report!r}")
-        for noise in ("is wordy", "text with 3 sentences", "return back", "New UI texts"):
+        for noise in ("is wordy", "text with 3 sentences", "return back", "New UI texts"):  # tautology: example
             if noise in lean_report:
                 problems.append(f"default lean Stop emitted opt-in noise {noise!r}")
 
@@ -255,8 +261,8 @@ def hook_selftest():
         code, report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
         if code != 2:
             problems.append(f"Stop with a new finding exited {code}, expected 2")
-        for needed in ("is wordy", "says the same as", "text with 3 sentences", "return back", "New UI texts",
-                       "--accept"):  # tautology: example
+        for needed in ("is wordy", "says the same as", "text with 3 sentences", "return back",  # tautology: example
+                       "New UI texts", "--accept"):  # tautology: example
             if needed not in report:
                 problems.append(f"hook report without {needed!r}")
         for forbidden in ("Nunca abrir", "Client key", "Carregando tarefa", "Excluir esta tarefa"):
@@ -333,7 +339,7 @@ def hook_selftest():
             problems.append(f"Antigravity PreToolUse returned {code} {out!r}")
         target2.write_text((CASES / "app/src/explicacoes.rs").read_text(encoding="utf-8"), encoding="utf-8")
         code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), terminationReason="NO_TOOL_CALL")
-        if code != 0 or out.get("decision") != "continue" or "return back" not in out.get("reason", ""):
+        if code != 0 or out.get("decision") != "continue" or "return back" not in out.get("reason", ""):  # tautology: example
             problems.append(f"Antigravity Stop with a new finding returned {code} {out!r}")
         code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), terminationReason="NO_TOOL_CALL")
         if code != 0 or out != {}:

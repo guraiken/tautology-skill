@@ -9,12 +9,16 @@ app/src/dicas.rs:12 [copy] tooltip of ~3 lines in the balloon (103 characters, 2
 app/src/explicacoes.rs:50 [copy] text with 3 sentences (limit 2): "O app lê as listas. Ele guarda as tarefa"
 app/src/explicacoes.rs:55 [copy] "Você pode" is wordy: "Você pode tentar de novo ou voltar."
 app/src/explicacoes.rs:62 [copy] "Buscar tarefa no calendário" says the same as "Buscar no calendário" (line 61)
+app/src/rodape.rs:15 [design] render: footnote "As alterações são salvas automaticamente." under the content
+app/src/rodape.rs:21 [design] status: footnote "Atualização automática só no app instalado" under the content
 app/src/tela.rs:13 [copy] "Clique aqui" explains the obvious: "Clique aqui para abrir as configurações "
 app/src/tela.rs:3 [copy] render: 7 explanatory texts on one screen (limit 5; lines 7, 8, 9, 10, 11, 12)
 app/src/tela.rs:5 [copy] title ends with a period: "Lembretes salvos."
 app/src/tela.rs:6 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
 app/src/tela.rs:7 [copy] "Nesta tela você" explains the obvious: "Nesta tela você encontra todas as suas t"
+app/src/tela.rs:8 [copy] render: 6 of 6 fields carry a helper text (lines 8, 9, 10, 11, 12)
 app/src/tela2.rs:7 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
+src/repetida.py:14 [code] line identical to the previous one
 src/ui/tela.py:11 [code] comment restates the code: "incrementa o contador"
 src/ui/tela.py:15 [copy] title with 7 words / 42 characters (limit 6 / 48): "Ajuste os filtros para ver mais resultad"
 src/ui/tela.py:4 [copy] "Procura tarefas" says the same as "Buscar tarefas" (line 3)
@@ -26,6 +30,19 @@ web/Painel.tsx:12 [copy] "Buscar tarefa no calendário" says the same as "Buscar
 web/Painel.tsx:7 [copy] title ends with a period: "Lembretes salvos."
 web/Painel.tsx:8 [copy] button with 6 words / 39 characters (limit 4 / 28): "Salvar todas as alterações feitas agora"
 web/Painel.tsx:9 [copy] tooltip of ~3 lines in the balloon (110 characters, 2 sentence(s)): "Quando a tarefa vence, o app abre o lemb"
+web/Perfil.tsx:10 [copy] Perfil: decorative emoji in 3 UI texts (lines 10, 22, 23)
+web/Perfil.tsx:12 [copy] "Enter your email address" says the same as "Email" (line 11)
+web/Perfil.tsx:13 [copy] Perfil: 3 of 3 fields carry a helper text (lines 13, 16, 19)
+web/Perfil.tsx:15 [copy] "Digite seu telefone" says the same as "Telefone" (line 14)
+web/Perfil.tsx:18 [copy] "City" repeats the text on line 17
+web/Perfil.tsx:22 [copy] "Tip:" explains the obvious: "💡 Tip: changes are saved as you type."
+web/Perfil.tsx:7 [copy] "Manage your profile settings below." says the same as "Profile Settings" (line 6)
+web/Perfil.tsx:9 [design] 3 cards nested inside each other (limit 2)
+web/Planos.tsx:10 [design] Planos: 2 decorative badges (lines 10, 16)
+web/Planos.tsx:27 [copy] "Você pode" is wordy: "Você pode mudar isso quando quiser."
+web/Planos.tsx:27 [design] Planos: footnote "Você pode mudar isso quando quiser." under the content
+web/Planos.tsx:30 [design] Planos: footnote "As alterações são salvas automaticamente." under the content
+web/Planos.tsx:9 [design] Planos: tooltip or info icon on 3 of 3 controls (lines 9, 15, 21)
 web/Settings.tsx:11 [copy] "Find tasks" says the same as "Search tasks" (line 10)
 web/Settings.tsx:11 [copy] "Search tasks" repeats the text on line 10
 web/Settings.tsx:12 [copy] "You can" is wordy: "You can try again or go back to the list"

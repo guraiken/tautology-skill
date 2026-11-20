@@ -567,7 +567,7 @@ def raw_scan_file(path, only=None, checks=None, include_baseline=True):
         return []
     source = path.read_text(encoding="utf-8", errors="replace")
     is_t = core.is_test(rel)
-    test_from = next((i for i, l in enumerate(source.splitlines(), 1) if l.strip() == "#[cfg(test)]"), None) if suffix == ".rs" else None
+    test_from = core.rust_test_start(source.splitlines()) if suffix == ".rs" else None
     if not is_t and test_from is None:
         return []
 
@@ -644,19 +644,24 @@ def _has_new_test(path, snap, only):
     return False
 
 
-def stop_report(repo, session, state, gate, only_new_tests=False):
+def stop_report(repo, session, state, gate, only_new_tests=False, files=None):
     """Hook report on edited test files during /tautology-audit-tests, or automatically when creating a new test."""
     edited = state / f"{session}.files"
     shown = state / f"{session}.tests_audit.shown"
-    if not edited.is_file():
+    if files is None:
+        if not edited.is_file():
+            return None
+        file_paths = [Path(raw) for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if raw]
+    else:
+        file_paths = [Path(raw) for raw in files if raw]
+    if not file_paths:
         return None
     os.chdir(repo)
     root = repo.resolve()
     core.use_repo(root)
     findings = []
-    for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()):
-        path = Path(raw)
-        if not raw or not path.is_file() or not path.resolve().is_relative_to(root):
+    for path in file_paths:
+        if not path.is_file() or not path.resolve().is_relative_to(root):
             continue
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else core.added_lines(path)
@@ -666,7 +671,7 @@ def stop_report(repo, session, state, gate, only_new_tests=False):
             continue
         findings += scan_file(path, only=only, include_baseline=False)
     core.prune_paths(
-        [Path(r) for r in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if r],
+        file_paths,
         lambda p: raw_scan_file(p, only=None, checks=CHECKS, include_baseline=True),
         "test_audit.py",
         repo=root,
@@ -681,10 +686,12 @@ def stop_report(repo, session, state, gate, only_new_tests=False):
     skill_md = (HERE / "SKILL.md").as_posix()
     script_py = (HERE / "test_audit.py").as_posix()
     lines = [f"Test audit before delivering (skill tautology-audit-tests, {skill_md}).", "Findings:"]
-    lines += [f"- {f}" for f in new[:20]]
+    lines += [f"- {f}" for f in new[:8]]
+    if len(new) > 8:
+        lines.append(f"(+{len(new) - 8} more in CLI)")
     lines.append(
         "Fix self-confirming assertions, flaky skips/sleeps, and cloned tests without removing test coverage. "
-        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>".'
+        f'False positive? Accept silently: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>".'
     )
     return "\n".join(lines)
 

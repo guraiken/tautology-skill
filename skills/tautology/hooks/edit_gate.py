@@ -16,7 +16,6 @@ from pathlib import Path
 SCANNED_SUFFIXES = {
     ".py", ".rs", ".ps1", ".bat", ".cmd", ".sh",
     ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
-    ".md", ".txt",
 }
 MAX_BYTES = 1_500_000
 
@@ -97,6 +96,8 @@ def should_track(repo, source):
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):  # Windows defaults to the ANSI codepage
+        stream.reconfigure(encoding="utf-8")
     payload = json.load(sys.stdin)
     target = target_of(payload)
     if event_of(payload) != "PreToolUse" or not target:

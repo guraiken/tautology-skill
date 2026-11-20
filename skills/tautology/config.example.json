@@ -1,6 +1,7 @@
 {
   "languages": [
-    "en"
+    "en",
+    "pt"
   ],
   "ui_paths": [
     "src/ui/"
@@ -65,13 +66,15 @@
   "hook_scan_answer": false,
   "hook_review_new_ui_texts": false,
   "hook_bloat": false,
+  "max_emojis": 0,
   "theme_paths": [
     "src/theme/"
   ],
   "design": {
     "max_container_depth": 3,
+    "max_card_nesting": 2,
     "max_cards": 6,
-    "max_dividers": 4,
+    "max_dividers": 3,
     "max_badges": 6,
     "max_icons": 10,
     "max_header_stack": 2,

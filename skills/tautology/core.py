@@ -73,9 +73,11 @@ LANG = {
                       "new innovation", "close proximity", "final outcome"],
         "negation": ["not", "never", "without", "no"],
         "condition": ["if", "when", "unless", "until", "before", "after"],
-        "obvious": [r"click here", r"this (screen|page|section) (shows|lets|lists)"],
+        "obvious": [r"click here", r"this (screen|page|section) (shows|lets|lists)", r"(?:pro )?tip\s*:",
+                    r"note\s*:"],
         "wordy": [r"allows you to", r"you can "],
-        "confirmation": [],
+        "confirmation": [r"delete", r"remove", r"discard", r"undo\w*", r"permanent\w*", r"irreversib\w*",
+                         r"can(?:not|'t) be (?:undone|reversed|recovered)"],
         "security": [],
         "doubled_ok": [],
         "endings": [],
@@ -94,7 +96,7 @@ LANG = {
         "negation": ["nao", "nunca", "sem", "nenhum", "nenhuma", "jamais"],
         "condition": ["se", "quando", "ate", "antes d[eoa]s?", "depois d[eoa]s?", "caso", "enquanto", "exceto",
                       "salvo"],
-        "obvious": [r"clique (aqui|neste|nesse|no botão|em cima)", r"use (este|esse|o) (botão|campo)",
+        "obvious": [r"dica\s*:", r"nota\s*:", r"clique (aqui|neste|nesse|no botão|em cima)", r"use (este|esse|o) (botão|campo)",
                     r"n?(esta|essa) (tela|seção|página|aba|área|janela|lista) (mostra|exibe|lista|permite|serve|você)",
                     r"aqui (você|voce) (pode|vê|ve|encontra)", r"(você|voce) (encontra|vê|verá)",
                     r"basta (clicar|tocar)"],
@@ -187,12 +189,12 @@ KIND_PATTERNS = [  # (kind, case-insensitive, default patterns)
     ("notice", True, [r"\b(progress|notice\w*|status|toast|Err|invalid|blocked|message)\b"]),
 ]
 DEFAULTS = {
-    "languages": ["en"],
+    "languages": ["en", "pt"],
     "ui_paths": [],            # files or folders that are UI even without a framework import
     "test_paths": [],          # extra test folders
     "skip_dirs": [],           # extra folders to ignore
     "sensitive_paths": [],     # payment/legal copy: no length finding, listed for review instead
-    "synonyms": [],            # extra concept lines: "first-word synonym synonym..."
+    "synonyms": [],            # extra concept lines: "first-word synonym synonym..."  tautology: example
     "kinds": {},               # kind -> extra regexes of calls that receive that kind of text
     "tooltip_calls": [],       # extra regexes of calls whose argument is a tooltip (measured whole)
     "tooltip_second_arg": [],  # tooltip calls whose tooltip is the second argument
@@ -206,11 +208,13 @@ DEFAULTS = {
     "hook_scan_answer": False,         # Stop hook: scan the agent's chat answer (opt-in to avoid noisy turns)
     "hook_review_new_ui_texts": False, # Stop hook: list every new UI string (auto-on during debloat-design)
     "hook_bloat": False,               # Stop hook: run length/wordy/density checks (always on in CLI & debloat-design)
+    "max_emojis": 0,                   # UI texts with an emoji allowed per screen before it counts as decoration
     "theme_paths": [],         # files or folders where palette/design tokens are defined
     "design": {                # thresholds and token hints for design_audit.py
         "max_container_depth": 3,
+        "max_card_nesting": 2,  # bordered boxes inside each other (JSX), checked by the default hook
         "max_cards": 6,
-        "max_dividers": 4,
+        "max_dividers": 3,
         "max_badges": 6,
         "max_icons": 10,
         "max_header_stack": 2,
@@ -239,7 +243,7 @@ class Settings:
         if self.path.is_file():
             raw.update(json.loads(self.path.read_text(encoding="utf-8")))
         self.raw = raw
-        langs = [l for l in raw["languages"] if l in LANG] or ["en"]
+        langs = [l for l in raw["languages"] if l in LANG] or DEFAULTS["languages"]
         self.languages = langs
 
         def joined(key):
@@ -334,6 +338,67 @@ class Finding:
 
     def __str__(self):
         return f"{self.path}:{self.line} [{self.kind}] {self.problem} -> {self.fix}"
+
+
+def report_lines(findings):
+    """Hook report lines: a fix already printed for an earlier finding is not printed again."""
+    seen, out = set(), []
+    for f in findings:
+        out.append(f"- {f.path}:{f.line} [{f.kind}] {f.problem}" + ("" if f.fix in seen else f" -> {f.fix}"))
+        seen.add(f.fix)
+    return out
+
+
+# ----------------------------------------------------------------------------- AI visual tics
+# A tic finding asks for a rebuild, not a deletion: the report adds the screen's own vocabulary and the
+# file is remembered, so the lines that fix it are checked for hardcoded styles.
+TIC_PROBLEM = re.compile(r"carry a helper text|decorative emoji|decorative badges|: footnote \"|tooltip or info icon|"
+                         r"cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards")
+TICS = []  # paths with a tic reported in this hook run (hunt and design audit share this module)
+
+
+def note_tics(findings, state=None, session=None):
+    paths = sorted({f.path for f in findings if TIC_PROBLEM.search(f.problem)})
+    TICS.extend(p for p in paths if p not in TICS)
+    if paths and state is not None:
+        with (Path(state) / f"{session}.tics").open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(paths) + "\n")
+
+
+def tic_files(state, session):
+    marker = Path(state) / f"{session}.tics"
+    return set(marker.read_text(encoding="utf-8").splitlines()) - {""} if marker.is_file() else set()
+
+
+VOCAB = [
+    re.compile(r"\b(?:p|palette|theme|colors|tokens)\.(?:[a-z]\w*)(?:\.\w+)?"),  # GPUI palette, theme objects
+    re.compile(r"\b(?:visual|kit|theme|ui)::\w+"),                               # Rust component modules
+    re.compile(r"var\(--[\w-]+\)"),                                               # CSS custom properties
+    re.compile(r"\b(?:bg|text|border|ring|fill)-(?:primary|secondary|muted|accent|destructive|success|warning|danger|"
+               r"info|foreground|background|card|popover|surface|subtle)(?:-[\w/]+)?\b"),  # semantic Tailwind
+    re.compile(r"<(?:[A-Z]\w*(?:Icon|Text|Badge|Chip|Tag|Heading|Label|Stack))\b"),          # component kit
+]
+VOCAB_SKIP = re.compile(r"^(?:p|theme|tokens)\.(?:clone|into|get|map|len|to_\w+)$")
+
+
+def vocabulary(paths, root=None, limit=10):
+    """The tokens and components the edited screens and their siblings already use, most used first."""
+    base = Path(root or REPO)
+    files = []
+    for raw in paths:
+        path = (base / raw) if not Path(raw).is_absolute() else Path(raw)
+        if path.is_file():
+            files.append(path)
+            files += sorted(p for p in path.parent.glob(f"*{path.suffix}") if p != path)[:6]
+    count = Counter()
+    for path in dict.fromkeys(files):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for pattern in VOCAB:
+            count.update(m.group(0).lstrip("<") for m in pattern.finditer(text))
+    return [name for name, _ in count.most_common(limit * 2) if not VOCAB_SKIP.match(name)][:limit]
 
 
 # ----------------------------------------------------------------------------- accepted
@@ -723,6 +788,17 @@ def ui_text(line):
 
 # Screen reader and comparisons: the text does not appear next to the visible label.
 OFF_SCREEN = re.compile(r"(?i)accessib|setAccessible|aria_?label|aria-label|\balt=")
+
+
+def rust_test_start(lines):
+    """Line of the inline `#[cfg(test)] mod tests { ... }`. `mod tests;` lives in another file and a
+    gated `use` or helper is one item: neither starts the test part of this file."""
+    for number, line in enumerate(lines, 1):
+        if line.strip() == "#[cfg(test)]":
+            following = next((l.strip() for l in lines[number:number + 3] if l.strip()), "")
+            if re.match(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{", following):
+                return number
+    return None
 
 
 def on_screen(line, literal):
