@@ -454,13 +454,9 @@ def briefing(found, arch, trigger, created=()):
         )
     if not arch.defined and found:
         if arch.docs:
-            lines.append(f"The architecture is described in {', '.join(arch.docs)}, but the destination map is "
-                         f"missing. Read the description, write the map to {MAP_FILE.as_posix()} (format in SKILL.md) "
-                         "citing the source, and only then extract.")
-        else:
-            lines.append("The repository defines no architecture. Before extracting, ask the user with "
-                         f"AskUserQuestion which one to adopt and write the choice to {MAP_FILE.as_posix()}:")
-            lines += [f"- {name}: {about}" for name, about in OPTIONS]
+            lines.append(f"Architecture docs exist ({', '.join(arch.docs)}), but {MAP_FILE.as_posix()} is missing; follow the existing structure.")
+        elif any("same file" not in f.fix for f in found[:PER_ROUND]):
+            lines.append("No architecture map: follow the existing folder structure (or extract locally inside the same file).")
     if found:
         lines.append("Repeated patterns that involve this session's files:")
         for n, f in enumerate(found[:PER_ROUND], 1):
@@ -468,14 +464,9 @@ def briefing(found, arch, trigger, created=()):
         if len(found) > PER_ROUND:
             lines.append(f"(+{len(found) - PER_ROUND} in the next round or in patterns.py --all)")
         lines.append(
-            "Before creating any new component, helper or script, ask yourself whether an equivalent one already "
-            "exists in the repository; reuse or extend it instead of writing a local copy. "
-            "How to extract: the same sequence of calls, in the same order; only what varies between the places "
-            "becomes a parameter. Replace each place with the new call. Before editing each file, run "
-            "git status --porcelain -- <file> and skip files with changes that are not yours. Layer conflict: "
-            "do not extract, tell the user. "
-            + (f"Then: {arch.verify}. " if arch.verify else "Then: build and run the module's tests. ")
-            + "If it is not a repetition to extract (coincidence, framework idiom), record it silently: "
+            "Extract shared logic (parameterizing only what varies; skip files with unrelated git edits; "
+            + (f"verify with {arch.verify}). " if arch.verify else "then build/test). ")
+            + "False positive? Accept silently: "
             + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
     return "\n".join(lines)
 
@@ -530,7 +521,7 @@ def hook_selftest():
             if code != 2:
                 problems.append(f"{variant}: Stop exited {code}, expected 2")
             needed = ["new component", "src/components/visual.rs"] if variant == "with a map" else [
-                "AskUserQuestion", "Shared layers"]
+                "No architecture map"]
             problems += [f"{variant}: briefing without {n!r}" for n in needed if n not in report]
             if "flex_1().min_w_0()" in report:
                 problems.append(f"{variant}: framework idiom became a finding")

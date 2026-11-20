@@ -75,7 +75,18 @@ def reuse_reminder(repo):
     )
 
 
-SCRIPT_EXTS = {".py", ".ps1", ".sh", ".bat", ".cmd", ".js", ".ts", ".mjs", ".cjs"}
+SHELL_SCRIPT_EXTS = {".py", ".ps1", ".sh", ".bat", ".cmd"}
+JS_SCRIPT_EXTS = {".js", ".ts", ".mjs", ".cjs"}
+SCRIPT_DIRS = {"scripts", "bin"}
+
+
+def is_script(rel, suffix):
+    if suffix in SHELL_SCRIPT_EXTS:
+        return True
+    if suffix in JS_SCRIPT_EXTS:
+        parts = {p.lower() for p in Path(rel).parts[:-1]}
+        return bool(parts & SCRIPT_DIRS)
+    return False
 
 
 def newly_created_files(repo, session, state, gate, reminded_file):
@@ -95,7 +106,7 @@ def newly_created_files(repo, session, state, gate, reminded_file):
         if rel in reminded or arch.excluded(rel) or patterns.core.is_test(rel) or rel.startswith((".claude/", ".agents/")):
             continue
         snap = gate.snapshot_of(state, session, path)
-        if snap.is_file() and snap.stat().st_size == 0 and (arch.is_component(rel) or path.suffix.lower() in SCRIPT_EXTS):
+        if snap.is_file() and snap.stat().st_size == 0 and (arch.is_component(rel) or is_script(rel, path.suffix.lower())):
             created.append(rel)
     if created:
         with reminded_file.open("a", encoding="utf-8") as handle:
@@ -103,9 +114,16 @@ def newly_created_files(repo, session, state, gate, reminded_file):
     return created
 
 
+APPROVAL = re.compile(
+    r"(?i)^\W*(pode|podemos|sim|ok|okay|beleza|manda|segue|continu\w*|aplic\w*|fa[çc]a|faz|vai|yes|go|apply|"
+    r"proceed|continue|do it|lgtm)\b"
+)
+
+
 def _sync_mode_flag(flag_path, triggered, keep_re, exit_re, prompt):
+    short_approval = len(prompt.split()) <= 6 and bool(APPROVAL.search(prompt))
     keep = bool(prompt) and flag_path.exists() and not exit_re.search(prompt) and (
-        bool(keep_re.search(prompt)) or len(prompt.split()) <= 12
+        bool(keep_re.search(prompt)) or short_approval
     )
     if triggered or keep:
         flag_path.write_text("1", encoding="utf-8")
@@ -114,6 +132,8 @@ def _sync_mode_flag(flag_path, triggered, keep_re, exit_re, prompt):
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):  # Windows defaults to the ANSI codepage
+        stream.reconfigure(encoding="utf-8")
     payload = json.load(sys.stdin)
     agy = "hookEventName" in payload
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
@@ -148,12 +168,10 @@ def main():
         flag.unlink()
     digest = hashlib.sha1(prompt.encode("utf-8", errors="replace")).hexdigest()[:16] if prompt else ""
     already_reminded = prompt_stamp.is_file() and prompt_stamp.read_text(encoding="utf-8").strip() == digest
-    created = newly_created_files(repo, session, state, gate, reminded_file) if (state / f"{session}.files").is_file() else []
-    if ((is_refactor or is_build or is_build_test or is_skill_invoke) and digest and not already_reminded) or created:
-        if digest and not already_reminded:
-            prompt_stamp.write_text(digest, encoding="utf-8")
+    if (is_refactor or is_build or is_build_test or is_skill_invoke) and digest and not already_reminded:
+        prompt_stamp.write_text(digest, encoding="utf-8")
         parts = []
-        if is_refactor or is_build or created:
+        if is_refactor or is_build:
             parts.append(reuse_reminder(repo))
         if is_debloat:
             parts.append("During tautology-debloat-design, use only project theme tokens/variables (no hardcoded colors, font sizes or corner radii).")
@@ -162,8 +180,10 @@ def main():
         if SELF_IMPROVE_FILE.is_file():
             parts.append(SELF_IMPROVE_FILE.read_text(encoding="utf-8").strip())
         msg = " ".join(parts)
-        if created:
-            msg = f"New component/script started ({', '.join(created)}). " + msg
+        if not msg:
+            if agy:
+                print("{}")
+            return 0
         if agy:
             print(json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": msg}}]}, ensure_ascii=False))
         else:
@@ -174,19 +194,24 @@ def main():
     return 0
 
 
-def stop_report(repo, session, state, gate):
+def stop_report(repo, session, state, gate, files=None):
     """The extraction briefing that sends the answer back, or None when there is no new pattern."""
     flag, shown = state / f"{session}.refactor", state / f"{session}.modular.shown"
     edited = state / f"{session}.files"
-    if not edited.is_file():
+    if files is None:
+        if not edited.is_file():
+            return None
+        file_paths = [Path(raw) for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if raw]
+    else:
+        file_paths = [Path(raw) for raw in files if raw]
+    if not file_paths:
         return None
     patterns = load("patterns", SKILL / "patterns.py")
     arch = patterns.Architecture(repo)
     refactor = flag.exists()
     touched, triggers, created = {}, [], []
-    for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()):
-        path = Path(raw)
-        if not raw or not path.is_file() or not path.resolve().is_relative_to(repo):
+    for path in file_paths:
+        if not path.is_file() or not path.resolve().is_relative_to(repo):
             continue
         rel = path.resolve().relative_to(repo).as_posix()
         if (path.suffix not in patterns.CODE or arch.excluded(rel) or patterns.core.is_test(rel)
@@ -202,7 +227,7 @@ def stop_report(repo, session, state, gate):
             triggers.append(f"new component {rel}" if new else f"changed component {rel}")
             if new:
                 created.append(rel)
-        elif new and path.suffix.lower() in SCRIPT_EXTS:
+        elif new and is_script(rel, path.suffix.lower()):
             touched[rel] = changed
             triggers.append(f"new script {rel}")
             created.append(rel)
@@ -217,15 +242,14 @@ def stop_report(repo, session, state, gate):
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keyed = [(hashlib.sha1(f"{f.rule}:{f.subject}".encode()).hexdigest()[:16], f) for f in found]
     new = [(k, f) for k, f in keyed if k not in before]
-    new_created = [rel for rel in created if f"new:{rel}" not in before]
-    if not new and not new_created:
+    if not new:
         return None
     batch = new[:patterns.PER_ROUND]
     with shown.open("a", encoding="utf-8") as handle:
-        entries = [k for k, _ in batch] + [f"new:{rel}" for rel in new_created]
+        entries = [k for k, _ in batch]
         handle.write("\n".join(entries) + "\n")
     trigger = "; ".join(triggers[:3]) + (f" (+{len(triggers) - 3})" if len(triggers) > 3 else "")
-    return patterns.briefing([f for _, f in new], arch, trigger, created=new_created)
+    return patterns.briefing([f for _, f in new], arch, trigger)
 
 
 if __name__ == "__main__":
