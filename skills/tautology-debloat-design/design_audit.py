@@ -90,6 +90,10 @@ CSS_SCOPE_RE = re.compile(r"^\s*(?::root\b|@theme\b|\[data-theme\b)")
 TW_COLOR_RE = re.compile(
     r"\b(?:bg|text|border|ring|fill|stroke|from|via|to|outline|shadow|accent|decoration)-\[(#[0-9a-fA-F]{3,8}|(?:rgba?|hsla?)\([^\]\n]+\))\]"
 )
+TW_RAW_COLOR_RE = re.compile(
+    r"\b(?:bg|text|border|ring|from|via|to|fill|stroke|outline|shadow)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|"
+    r"yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b"
+)
 TW_FONT_RE = re.compile(r"\btext-\[(\d+(?:\.\d+)?)(px|rem|em)\]")
 TW_RADIUS_RE = re.compile(r"\brounded(?:-[trbl]{1,2})?-\[(\d+(?:\.\d+)?)(px|rem|em)\]")
 THEME_STYLE_HINT_RE = re.compile(r"\b(?:visual::\w+|theme::\w+|\w+_radius|var\(--|tokens\.)")
@@ -633,7 +637,7 @@ def _peer_record(ppath, file_cache):
     psuf = ppath.suffix.lower()
     praw = psource.splitlines()
     plines = copy_rules.jsx_lines(praw) if psuf in core.JSX else praw
-    ptest = next((i for i, l in enumerate(praw, 1) if l.strip() == "#[cfg(test)]"), None) if psuf == ".rs" else None
+    ptest = core.rust_test_start(praw) if psuf == ".rs" else None
     pskip = core.ignored_lines(praw)
     fn_names = {name for _, name, _ in _function_spans(plines, psuf, ptest)}
     rec = (rel, ppath, plines, psource, psuf, ptest, pskip, fn_names)
@@ -917,6 +921,13 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                     f'hardcoded Tailwind arbitrary color "{tw_c.group(0)[:36]}"',
                     CSS_FIX,
                 ))
+            tw_raw = TW_RAW_COLOR_RE.search(raw) if tokens["has_palette"] and not tw_c else None
+            if tw_raw:  # the project names its colours; a stock palette shade bypasses them
+                out.append(core.Finding(
+                    rel, number, "style",
+                    f'stock Tailwind color "{tw_raw.group(0)}" in a themed project',
+                    CSS_FIX,
+                ))
             tw_f = TW_FONT_RE.search(raw) if tokens["has_font_tokens"] else None
             if tw_f and (tw_f.group(2) != "px" or float(tw_f.group(1)) >= 10):
                 out.append(core.Finding(
@@ -1004,7 +1015,7 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
     raw_lines = source.splitlines()
     skip = core.ignored_lines(raw_lines)
     look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
-    test_from = next((i for i, l in enumerate(raw_lines, 1) if l.strip() == "#[cfg(test)]"), None) if suffix == ".rs" else None
+    test_from = core.rust_test_start(raw_lines) if suffix == ".rs" else None
 
     out = []
     if suffix in core.CODE and "design" in wanted and not is_theme_file(rel):
@@ -1016,47 +1027,72 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
     return out
 
 
-def stop_report(repo, session, state, gate):
-    """Hook report during a tautology-debloat-design session for newly edited UI files."""
+def stop_report(repo, session, state, gate, files=None, lean=False, style_only=False):
+    """Hook report for newly edited UI files. lean (every session): only layout clutter (dividers,
+    boxes, chips, stacked texts); a tautology-debloat-design session also checks hardcoded styles, and
+    so does a file where an AI visual tic was reported. style_only: the pass right after a block, on
+    the files that had a tic: did the fix bring a hardcoded color, size or radius?"""
     edited = state / f"{session}.files"
     shown = state / f"{session}.design.shown"
-    if not edited.is_file():
+    if files is None:
+        if not edited.is_file():
+            return None
+        file_paths = [Path(raw) for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if raw]
+    else:
+        file_paths = [Path(raw) for raw in files if raw]
+    if not file_paths:
         return None
     os.chdir(repo)
     root = repo.resolve()
     core.use_repo(root)
-    tokens = discover_project_tokens(root)
+    tics = core.tic_files(state, session)
+    if style_only:
+        file_paths = [p for p in file_paths if core.relative(p) in tics]
+        if not file_paths:
+            return None
+    styled = {p for p in file_paths if style_only or not lean or core.relative(p) in tics}
+    # Lean mode only words a hint with these; the repository walk (~90 ms) is for style checks.
+    tokens = discover_project_tokens(root) if styled else {"uses_tooltips": bool(core.C.raw.get("tooltip_calls"))}
     cache = {}
     findings = []
-    for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()):
-        path = Path(raw)
-        if not raw or not path.is_file() or not path.resolve().is_relative_to(root):
+    for path in file_paths:
+        if not path.is_file() or not path.resolve().is_relative_to(root):
             continue
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else core.added_lines(path)
         if only is None or only:
-            findings += scan_file(path, only=only, tokens=tokens, checks={"design", "style"}, cache=cache)
-    core.prune_paths(
-        [Path(r) for r in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()) if r],
-        lambda p: raw_scan_file(p, only=None, tokens=tokens, checks=CHECKS, cache=cache),
-        "design_audit.py",
-        repo=root,
-    )
+            checks = {"style"} if style_only else {"design", "style"} if path in styled else {"design"}
+            findings += scan_file(path, only=only, tokens=tokens, checks=checks, cache=cache)
+    if not lean:  # pruning rescans every check, style included; a full run does it
+        core.prune_paths(
+            file_paths,
+            lambda p: raw_scan_file(p, only=None, tokens=tokens, checks=CHECKS, cache=cache),
+            "design_audit.py",
+            repo=root,
+        )
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keyed = {hashlib.sha1(f.key().encode()).hexdigest()[:16]: f for f in findings}
-    new = [f for k, f in keyed.items() if k not in before]
+    fresh = [k for k in keyed if k not in before]
+    new = [keyed[k] for k in fresh]
+    core.note_tics(new, state, session)
     if not new:
         return None
-    with shown.open("a", encoding="utf-8") as handle:
-        handle.write("\n".join(k for k in keyed if k not in before) + "\n")
-    skill_md = (HERE / "SKILL.md").as_posix()
+    limit = 4 if lean else 8
+    with shown.open("a", encoding="utf-8") as handle:  # also the cut ones: never back in a later turn
+        handle.write("\n".join(fresh) + "\n")
     script_py = (HERE / "design_audit.py").as_posix()
-    lines = [f"Design debloat check before delivering (skill tautology-debloat-design, {skill_md}).", "Findings:"]
-    lines += [f"- {f}" for f in new[:20]]
-    lines.append(
-        "Fix overloaded layout hierarchy and replace hardcoded styles with project theme variables/tokens. "
-        f'Record intentional exceptions silently with: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>".'
-    )
+    if style_only:
+        lines = ["The tic fix hardcodes styles; use the project's tokens instead:", *core.report_lines(new[:limit])]
+        return "\n".join(lines)
+    lines = ["UI layout clutter:" if lean else
+             f"Design debloat check before delivering (skill tautology-debloat-design, {(HERE / 'SKILL.md').as_posix()})."]
+    lines += core.report_lines(new[:limit])
+    if len(new) > limit:
+        lines.append(f"(+{len(new) - limit} more in CLI)")
+    accept = f'"{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>"'
+    lines.append(f"Not clutter? Accept silently: {accept}." if lean else
+                 "Fix overloaded layout hierarchy and replace hardcoded styles with project theme variables/tokens. "
+                 f"False positive? Accept silently: {accept}.")
     return "\n".join(lines)
 
 
@@ -1164,6 +1200,10 @@ def selftest():
         run_prompt("pode aplicar")
         if not design_flag.is_file():
             problems.append("modular_gate dropped .design flag on short continuation prompt")
+        run_prompt("qual o status do pedido 123?")
+        if design_flag.is_file():
+            problems.append("modular_gate kept .design flag on unrelated short prompt")
+        run_prompt("/tautology-debloat-design clean_modal")
         run_prompt("agora vamos auditar os testes unitarios do worker e depois fazer git commit")
         if design_flag.is_file():
             problems.append("modular_gate kept .design flag after switching away to tests/commit")
