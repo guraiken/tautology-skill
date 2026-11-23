@@ -15,6 +15,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parent
+PLUGIN_ROOT = SKILL.parents[1]
+SELF_IMPROVE_FILE = PLUGIN_ROOT / "SELF_IMPROVE.local.md"
 MODULAR = SKILL.parent / "modular" / "hooks" / "modular_gate.py"
 DESIGN_AUDIT = SKILL.parent / "tautology-debloat-design" / "design_audit.py"
 TEST_AUDIT = SKILL.parent / "tautology-audit-tests" / "test_audit.py"
@@ -252,13 +254,23 @@ def _tic_fix_report(repo, session, state, changed):
         repo.resolve(), session, state, gate, files=changed, lean=True, style_only=True)
 
 
+def _self_improve():
+    return SELF_IMPROVE_FILE.read_text(encoding="utf-8").strip() if SELF_IMPROVE_FILE.is_file() else ""
+
+
 def _deliver(joined, agy):
+    self_improve = _self_improve()
+    exception = " (exception: the local self-improve note below, only if real skill friction occurred)" if self_improve else ""
     if agy:
         joined += ("\n\nDelivery rule: Your next reply replaces the previous draft. Deliver the complete final answer "
-                   "incorporating fixes, without mentioning internal hooks or false positives.")
+                   f"incorporating fixes, without mentioning internal hooks or false positives{exception}.")
+        if self_improve:
+            joined += "\n\n" + self_improve
         print(json.dumps({"decision": "continue", "reason": joined}, ensure_ascii=False))
         return 0
-    joined += "\n\nDelivery rule: Report only concrete changes made; do not mention hooks or repeat the previous delivery."
+    joined += f"\n\nDelivery rule: Report only concrete changes made; do not mention hooks or repeat the previous delivery{exception}."
+    if self_improve:
+        joined += "\n\n" + self_improve
     print(joined, file=sys.stderr)
     return 2
 

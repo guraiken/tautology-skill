@@ -177,7 +177,7 @@ def main():
             parts.append("During tautology-debloat-design, use only project theme tokens/variables (no hardcoded colors, font sizes or corner radii).")
         if is_tests_audit or is_build_test:
             parts.append("During tautology-audit-tests, check results against independent expected values, guard loops against empty inputs, and consolidate cloned tests without dropping coverage.")
-        if SELF_IMPROVE_FILE.is_file():
+        if is_skill_invoke and SELF_IMPROVE_FILE.is_file():
             parts.append(SELF_IMPROVE_FILE.read_text(encoding="utf-8").strip())
         msg = " ".join(parts)
         if not msg:
