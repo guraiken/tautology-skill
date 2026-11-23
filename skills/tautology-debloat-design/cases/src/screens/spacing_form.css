@@ -1,0 +1,5 @@
+.form-row { padding: 24px 16px 8px; }
+.form-title { margin-top: 24px; margin-bottom: 8px; }
+.form-card { padding: 26px; }
+.form-field { padding: 8px 12px; margin-bottom: 12px; }
+.form-section { padding: 16px; .form-legend { margin: 8px 0; } }

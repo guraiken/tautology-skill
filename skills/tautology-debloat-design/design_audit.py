@@ -1,17 +1,19 @@
 """Static visual-design auditor for screens: overloaded hierarchy, visual repetition, excessive
-padding/clutter, hardcoded styles outside theme files, UI state inventory, and PNG visual checks.
+padding/clutter, spacing off the project's rhythm, hardcoded styles outside theme files, UI state
+inventory, and PNG visual checks.
 
     python design_audit.py --find settings                  # locate screen files by name/symbol/title
     python design_audit.py --states path/to/screen          # list interactive UI states, modals, and hooks
     python design_audit.py --all path/to/screen             # full audit of the target screen
     python design_audit.py --diff                           # changed UI lines against HEAD
-    python design_audit.py --only design,style ...          # checks: design, style, bloat
+    python design_audit.py --only design,style ...          # checks: design, style, spacing, bloat
     python design_audit.py --check-image shot.png           # verify screenshot is non-blank and measure density
     python design_audit.py --compare before.png after.png   # diff regions & visual density between captures
     python design_audit.py --accept "<line>" --reason "<why>"
     python design_audit.py --selftest
 """
 import argparse
+import bisect
 import hashlib
 import json
 import os
@@ -31,9 +33,10 @@ for extra in (HERE, TAUTOLOGY_DIR, MODULAR_DIR):
 import core  # noqa: E402
 import copy_rules  # noqa: E402
 import hunt  # noqa: E402
+import spacing  # noqa: E402
 import visual_check  # noqa: E402
 
-CHECKS = {"design", "style", "bloat"}
+CHECKS = {"design", "style", "spacing", "bloat"}
 STYLE_EXT = {".css", ".scss"}
 SCAN_EXT = core.CODE | STYLE_EXT
 DEFAULT_THEME_RE = re.compile(r"(^|/)(?:(?:theme|tokens|palette|colors)(?:/|\.)|styles?/)", re.I)
@@ -1085,6 +1088,45 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                     ))
 
 
+_SPACING_SCALES = {}
+FN_HEAD_RE = re.compile(
+    r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|def|function)\s+(\w+)"
+    r"|\s*(?:export\s+)?(?:const|let)\s+([A-Z]\w*)\s*=\s*(?:\([^)]*\)|\w+)\s*=>"
+)
+
+
+def spacing_scale(root=None):
+    """The project's spacing steps and named spacing constants, learned once per repository.
+    Oversized files (bundles, generated stylesheets) are left out, as in the audit itself: their
+    thousands of values would set the scale the hand-written screens are judged by."""
+    key = str(Path(root or core.REPO).resolve())
+    if key not in _SPACING_SCALES:
+        _SPACING_SCALES[key] = spacing.learn_scale(
+            (path.read_text(encoding="utf-8", errors="replace"), suffix)
+            for _, path, suffix in _tracked_candidates(root)
+            if path.is_file() and path.stat().st_size <= core.MAX_BYTES
+        )
+    return _SPACING_SCALES[key]
+
+
+def _spacing_checks(rel, raw_lines, suffix, look, test_from, out):
+    if is_theme_file(rel):
+        return
+    limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(raw_lines)
+    lines = raw_lines[:limit]
+    # The enclosing function by its header line: `render_owner` per line costs ~60 ms a file.
+    heads = [(number, m.group(1) or m.group(2)) for number, line in enumerate(lines, 1)
+             for m in [FN_HEAD_RE.match(line)] if m and (m.group(1) or m.group(2))] if suffix in core.CODE else []
+    starts = [number for number, _ in heads]
+
+    def fn_of(line):
+        at = bisect.bisect_right(starts, line) - 1
+        return heads[at][1] if at >= 0 else Path(rel).stem
+
+    steps, tokens = spacing_scale()
+    out += spacing.check(rel, lines, suffix, fn_of, look, steps, tokens)
+
+
 def scan_file(path, only=None, tokens=None, checks=None, cache=None):
     return [f for f in raw_scan_file(path, only=only, tokens=tokens, checks=checks, cache=cache) if not core.accepted(f)]
 
@@ -1113,6 +1155,8 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
         _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens["uses_tooltips"], out, cache=cache)
     if "style" in wanted:
         _style_checks(rel, raw_lines, suffix, look, skip, test_from, tokens, out)
+    if "spacing" in wanted:
+        _spacing_checks(rel, raw_lines, suffix, look, test_from, out)
     if suffix in core.CODE and "bloat" in wanted:
         out += [f for f in hunt.scan_file(path, only) if f.kind == "copy"]
     return out
@@ -1152,7 +1196,7 @@ def stop_report(repo, session, state, gate, files=None, lean=False, style_only=F
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else core.added_lines(path)
         if only is None or only:
-            checks = {"style"} if style_only else {"design", "style"} if path in styled else {"design"}
+            checks = {"style"} if style_only else ({"design", "style"} | ({"spacing"} if not lean else set())) if path in styled else {"design"}
             findings += scan_file(path, only=only, tokens=tokens, checks=checks, cache=cache)
     if not lean:  # pruning rescans every check, style included; a full run does it
         core.prune_paths(
@@ -1250,6 +1294,46 @@ def selftest():
         clean_bar = scan_file(repo / "src" / "screens" / "toolbar_clean.rs", only=None, tokens=tokens, checks=CHECKS)
         if clean_bar:
             problems.append(f"toolbar_clean.rs reported false positive(s): {[str(f) for f in clean_bar]!r}")
+
+        # Spacing rhythm: off-scale values, lopsided padding, label far from its control, uneven like
+        # siblings, irregular spacers, heading closer to what precedes it, inner stack looser.
+        spaced = scan_file(repo / "src" / "screens" / "spacing_dirty.rs", only=None, tokens=tokens, checks={"spacing"})
+        spaced_text = "\n".join(str(f) for f in spaced)
+        for needed in (
+            "render_profile_form: off-scale spacing 26px",
+            "lopsided padding on div: 24px above, 8px below",
+            "text_field sits 40px from its label field_label but 8px from the next item",
+            "uneven spacing between like siblings (text_field): 32px and 8px",
+            "irregular spacing between siblings of div: 24, 16, 6px",
+            "section_title sits closer to what precedes it (4px) than to its content (20px)",
+            "inner stack div spaced looser (24px) than its parent (8px)",
+        ):
+            if needed not in spaced_text:
+                problems.append(f"spacing_dirty.rs missing expected finding {needed!r}:\n{spaced_text}")
+        spaced_css = "\n".join(str(f) for f in scan_file(
+            repo / "src" / "screens" / "spacing_form.css", only=None, tokens=tokens, checks={"spacing"}))
+        for needed in (".form-row: lopsided padding: 24px above, 8px below", ".form-card: off-scale spacing 26px"):
+            if needed not in spaced_css:
+                problems.append(f"spacing_form.css missing expected finding {needed!r}:\n{spaced_css}")
+        if ".form-title" in spaced_css or ".form-field" in spaced_css:
+            problems.append(f"spacing_form.css flagged a heading margin or an even field:\n{spaced_css}")
+        # A label tight to its input, a heading with more room above, border compensation, and
+        # spacing inside a `.when` closure are all fine.
+        spaced_clean = scan_file(repo / "src" / "screens" / "spacing_clean.rs", only=None, tokens=tokens, checks=CHECKS)
+        if spaced_clean:
+            problems.append(f"spacing_clean.rs reported false positive(s): {[str(f) for f in spaced_clean]!r}")
+        # Tailwind: one element per class attribute, variants judged on their own (stacked ones
+        # falling back to the outer variant), heading by tag or class, never by a `title=` attribute.
+        spaced_tw = scan_file(repo / "src" / "screens" / "spacing_cards.tsx", only=None, tokens=tokens, checks={"spacing"})
+        lopsided_tw = sorted(f.line for f in spaced_tw if "lopsided" in f.problem)
+        if lopsided_tw != [4, 8, 9] or not any("off-scale spacing 26px" in f.problem and f.line == 10 for f in spaced_tw):
+            problems.append("spacing_cards.tsx expected lopsided on lines 4, 8, 9 and 26px off-scale on 10:\n"
+                            + "\n".join(str(f) for f in spaced_tw))
+        spaced_qt = "\n".join(str(f) for f in scan_file(
+            repo / "src" / "screens" / "spacing_qt.py", only=None, tokens=tokens, checks={"spacing"}))
+        for needed in ("build_panel: lopsided margins: 24px above, 6px below", "build_panel: off-scale spacing 26px"):
+            if needed not in spaced_qt:
+                problems.append(f"spacing_qt.py missing expected finding {needed!r}:\n{spaced_qt}")
 
         # W1 (multi-line None) + W2 (if / else if / else + early return) must not false-positive.
         branched = scan_file(repo / "src" / "screens" / "branched_clean.rs", only=None, tokens=tokens, checks={"design"})
