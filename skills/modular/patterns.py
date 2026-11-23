@@ -46,9 +46,14 @@ COMMON = {"flex", "flex_1", "flex_col", "flex_row", "flex_none", "flex_shrink_0"
 BREAKERS = {"child", "children", "on_click", "on_mouse_down", "on_mouse_up", "on_hover", "when", "when_some",
             "with_animation", "on_action", "tooltip", "hint", "map", "and_then_some"}
 TRIVIAL_ARG = re.compile(r'^$|^"S"$|^-?[\d_.]+$|^px\(-?[\d_.]+\)$|^\w+\.\w+$|^\w+$')
-UI = re.compile(r"\bpx\(|\b(div|h_flex|v_flex)\(\)|\.child\(|\.text_\w+\(|\.bg\(|\.border\w*\(|\.rounded\w*\(|"
-                r"\b(?:gpui::|AnyElement|IntoElement|BoundsSlot|Window)\b|\bself\.palette\b|"
-                r"className=|<\w+[\s>]|\bstyle=")
+UI = re.compile(
+    r"\bpx\(|\b(div|h_flex|v_flex)\(\)|\.child\(|\.text_\w+\(|\.bg\(|\.border\w*\(|\.rounded\w*\(|"
+    r"\b(?:gpui::|AnyElement|IntoElement|BoundsSlot|Window)\b|\bself\.palette\b|"
+    r"\b(?:kit|visual)::\w+\(|\bcx\.(?:entity|listener|notify|emit)\(|"
+    r"\.(?:on_click|on_change|on_hover|on_mouse_\w+|hint|cursor_hint|tooltip|accessibility_label|into_any_element)\(|"
+    r"\b(?:useState|useEffect|useCallback|useMemo|QWidget|QPushButton|QLabel|QVBoxLayout|QHBoxLayout)\b|"
+    r"className=|<\w+[\s>]|\bstyle="
+)
 # Style methods (GPUI, Tailwind-like): a chain of only these is a visual piece, even without px() or a colour.
 STYLE = re.compile(r"\.(absolute|relative|top_\w+|left_\w+|right_\w+|bottom_\w+|inset_\w+|size_\w+|rounded\w*|"
                    r"border\w*|bg|shadow\w*|opacity|cursor_\w+|text_\w+|font_\w+|line_height|flex\w*|items_\w+|"
@@ -512,6 +517,15 @@ def selftest(record=False):
         return core.compare_expected(got, CASES / "expected.txt", record=True)
     differs = core.compare_expected(got, CASES / "expected.txt")
     problems = hook_selftest()
+    # Regression: blocks using GPUI context/widget helpers (cx.entity, kit::, on_change) route to UI layer 3, not layer 2.
+    arch = Architecture(repo)
+    ui_block = "let owner = cx.entity().downgrade();\nkit::switch(\"id\", enabled, p).hint(\"tip\", p).on_change(move |v, _, _, cx| {});"
+    target, conflict = destination([("src/screens/a/view.rs", 10), ("src/screens/b/view.rs", 10)], ui_block, arch)
+    if conflict or target != arch.destinations.get(3):
+        problems.append(f"GPUI widget block routed to {target!r} (conflict={conflict!r}), expected layer 3 {arch.destinations.get(3)!r}")
+    if problems:
+        for p in problems:
+            print(f"FAIL    {p}")
     return 1 if differs or problems else 0
 
 
