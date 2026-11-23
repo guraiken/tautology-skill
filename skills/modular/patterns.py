@@ -329,12 +329,28 @@ def block_patterns(index):
         sample = [t for _, t in index.lines[distinct[0][0]][distinct[0][1]: distinct[0][1] + size]]
         if sum(common_line(t, index.arch) for t in sample) >= 0.8 * size:
             continue  # only framework idiom (layout chains)
+        if sum(signature_line(t) for t in sample) >= 0.7 * size:
+            continue  # typed parameter list or struct field declarations
         for r, i in distinct:
             covered.update((r, i + k) for k in range(size))
             index.end[(r, index.lines[r][i][0])] = index.lines[r][min(i + size, len(index.lines[r])) - 1][0]
         where = tuple(sorted((r, index.lines[r][i][0]) for r, i in distinct))
         patterns.append(("block", f"{size} lines: {sample[0][:60]}", where, "\n".join(sample)))
     return patterns
+
+
+PARAM_DECL = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:mut\s+)?[A-Za-z_]\w*\s*\??:\s*([^=]+?),?\s*$")
+PARAM_TYPE = re.compile(
+    r"^(?:&(?:'\w+\s+)?(?:mut\s+)?|\*\s*(?:const|mut)\s+)?"
+    r"(?:(?:impl|dyn|fn)\b|[A-Z]\w*|[a-z_]\w*::[A-Za-z_]\w*|[\[(]|"
+    r"(?:usize|isize|bool|str|char|f32|f64|[iu](?:8|16|32|64|128)|"
+    r"string|number|boolean|void|any|unknown|never|int|float|bytes|dict|list|set|tuple)\b)"
+)
+
+
+def signature_line(text):
+    m = PARAM_DECL.match(text)
+    return bool(m and PARAM_TYPE.match(m.group(1).strip()))
 
 
 def common_line(text, arch):
@@ -547,6 +563,29 @@ def hook_selftest():
                 ts_patterns = findings(repo, Architecture(repo), {"src/typings/models.ts": None}, {".ts"})
                 if ts_patterns:
                     problems.append(f"TypeScript type declarations triggered pattern: {[str(f) for f in ts_patterns]!r}")
+                sig_file = repo / "src" / "screens" / "sigs.rs"
+                sig_file.write_text(
+                    "fn first_view(\n"
+                    "    kind: &'static str,\n"
+                    "    index: usize,\n"
+                    "    offset: usize,\n"
+                    "    shown: usize,\n"
+                    "    total: usize,\n"
+                    "    palette: Palette,\n"
+                    ") -> Div { div() }\n"
+                    "fn second_view(\n"
+                    "    kind: &'static str,\n"
+                    "    index: usize,\n"
+                    "    offset: usize,\n"
+                    "    shown: usize,\n"
+                    "    total: usize,\n"
+                    "    palette: Palette,\n"
+                    ") -> Div { div() }\n",
+                    encoding="utf-8",
+                )
+                sig_patterns = findings(repo, Architecture(repo), {"src/screens/sigs.rs": None}, {".rs"})
+                if sig_patterns:
+                    problems.append(f"Rust parameter list triggered pattern: {[str(f) for f in sig_patterns]!r}")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:
