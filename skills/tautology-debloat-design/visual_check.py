@@ -1,5 +1,10 @@
-"""Zero-dependency PNG verification and before/after region diffing for UI debloat checks."""
+"""Zero-dependency PNG (plus JPEG/WebP/BMP via Pillow or OS converter) verification and before/after region diffing."""
+import os
+import shutil
 import struct
+import subprocess
+import sys
+import tempfile
 import zlib
 from collections import Counter
 from pathlib import Path
@@ -101,11 +106,67 @@ def _sample_stats(width, height, channels, rows):
     }
 
 
-def inspect_image(path):
-    """Verifies that a UI capture PNG is readable, sized >= 200px, and not blank."""
+def _decode_non_png(path):
+    """Decodes JPEG/WebP/BMP via Pillow when installed, or converts to a temp PNG using built-in OS tools."""
+    src = Path(path)
+    if not src.is_file():
+        return None
+    try:
+        from PIL import Image  # type: ignore
+        with Image.open(src) as img:
+            rgb = img.convert("RGB")
+            w, h = rgb.size
+            raw = rgb.tobytes()
+            stride = w * 3
+            return w, h, 3, [raw[y * stride:(y + 1) * stride] for y in range(h)]
+    except Exception:
+        pass
+    tmp = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix="debloat-img-", suffix=".png")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        env = {**os.environ, "DEBLOAT_IMG_SRC": str(src), "DEBLOAT_IMG_DST": str(tmp)}
+        if sys.platform == "win32":
+            ps = (
+                "Add-Type -AssemblyName System.Drawing; "
+                "$img = [System.Drawing.Image]::FromFile($env:DEBLOAT_IMG_SRC); "
+                "try { $img.Save($env:DEBLOAT_IMG_DST, [System.Drawing.Imaging.ImageFormat]::Png) } "
+                "finally { $img.Dispose() }"
+            )
+            cmd = ["powershell.exe", "-NoProfile", "-Command", ps]
+        elif sys.platform == "darwin" and shutil.which("sips"):
+            cmd = ["sips", "-s", "format", "png", str(src), "--out", str(tmp)]
+        elif shutil.which("magick"):
+            cmd = ["magick", str(src), str(tmp)]
+        elif shutil.which("ffmpeg"):
+            cmd = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(src), str(tmp)]
+        else:
+            return None
+        res = subprocess.run(cmd, env=env, capture_output=True, timeout=15)
+        if res.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+            return None
+        return read_png(tmp)
+    except Exception:
+        return None
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def read_image(path):
+    """Decodes an 8-bit RGB/RGBA PNG directly, or JPEG/BMP/WebP via Pillow/OS converter."""
     decoded = read_png(path)
+    if decoded is not None:
+        return decoded
+    return _decode_non_png(path)
+
+
+def inspect_image(path):
+    """Verifies that a UI capture image is readable, sized >= 200px, and not blank."""
+    decoded = read_image(path)
     if decoded is None:
-        return {"ok": False, "reason": "unreadable or unsupported PNG format (expected 8-bit RGB/RGBA)"}
+        return {"ok": False, "reason": "unreadable or unsupported image format (expected 8-bit RGB/RGBA PNG or JPEG/BMP/WebP)"}
     width, height, channels, rows = decoded
     if width < MIN_SIDE or height < MIN_SIDE:
         return {"ok": False, "width": width, "height": height, "reason": f"image too small ({width}x{height})"}
@@ -140,8 +201,8 @@ def compare_images(before_path, after_path, tolerance=8, max_regions=12):
     info_b = inspect_image(after_path)
     if not info_a["ok"] or not info_b["ok"]:
         return {"ok": False, "before": info_a, "after": info_b, "regions": []}
-    w1, h1, ch_a, rows_a = read_png(before_path)
-    w2, h2, ch_b, rows_b = read_png(after_path)
+    w1, h1, ch_a, rows_a = read_image(before_path)
+    w2, h2, ch_b, rows_b = read_image(after_path)
     w, h = min(w1, w2), min(h1, h2)
     dx, dy = _likely_offset(w, h, ch_a, rows_a, ch_b, rows_b) if (w1, h1) == (w2, h2) else (0, 0)
 

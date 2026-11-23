@@ -33,7 +33,7 @@ python <skill dir>/design_audit.py --all <screen files>
 python <tautology dir>/hunt.py --all <screen files>
 python <modular dir>/patterns.py <screen files>
 ```
-If the user supplied PNG captures (or authorized visual verification in the project), run `--check-image <shot.png>` or `--compare <before.png> <after.png>` to verify visual density and changed regions alongside the code.
+If the user supplied PNG/JPEG captures (or authorized visual verification in the project), run `--check-image <shot>` or `--compare <before> <after>` to verify visual density and changed regions alongside the code.
 
 Evaluate every section across 5 axes:
 1. **Overloaded hierarchy:** cards inside cards, nested borders/fills, too many competing font weights or sizes.
@@ -50,7 +50,7 @@ Evaluate every section across 5 axes:
 
    Proximity decides the asymmetric cases. More room above a heading than below it is correct, and so is a label tight to its input. Fix with the container's gap and one larger step between groups, snapped to the scale or a spacing token. Do not insert new spacers.
 4. **Elements without clear purpose:** ornamental pills, labels/captions that restate what the control already shows, noisy secondary notes (remove them, or move genuinely helpful edge-case hints to the project's existing tooltip control — only if the project already uses tooltips).
-5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow — including **stacked/exposed filter rows** (secondary filter/sort dropdowns plus a permanent strip of status pills), **fixed-width filter/sort triggers** eating toolbar space, and **multiple competing solid primary accents** (save solid primary fill for the main CTA; keep selected filters and view toggles on a neutral/surface fill, and fold secondary filters into one `Filters` menu with active-only removable chips).
+5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow — including **stacked/exposed filter rows** (secondary filter/sort dropdowns plus a permanent strip of status pills), **fixed-width filter/sort triggers** eating toolbar space, and **multiple competing solid primary accents** (save solid primary fill for the main CTA; keep selected filters and view toggles on a neutral/surface fill, and fold secondary filters into one `Filters` menu with active-only removable chips). **Project convention takes precedence:** when the repository already has a shared navigation or tab component using `primary` for active tabs (e.g., `category_tabs`), keep screens consistent with that design-system pattern instead of overriding it with a generic fill.
 
 If the screen is already clean and balanced across all 5 axes, report what was checked and **change nothing**.
 
