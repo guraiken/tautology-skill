@@ -47,7 +47,8 @@ BREAKERS = {"child", "children", "on_click", "on_mouse_down", "on_mouse_up", "on
             "with_animation", "on_action", "tooltip", "hint", "map", "and_then_some"}
 TRIVIAL_ARG = re.compile(r'^$|^"S"$|^-?[\d_.]+$|^px\(-?[\d_.]+\)$|^\w+\.\w+$|^\w+$')
 UI = re.compile(r"\bpx\(|\b(div|h_flex|v_flex)\(\)|\.child\(|\.text_\w+\(|\.bg\(|\.border\w*\(|\.rounded\w*\(|"
-                r"\bgpui::|className=|<\w+[\s>]|\bstyle=")
+                r"\b(?:gpui::|AnyElement|IntoElement|BoundsSlot|Window)\b|\bself\.palette\b|"
+                r"className=|<\w+[\s>]|\bstyle=")
 # Style methods (GPUI, Tailwind-like): a chain of only these is a visual piece, even without px() or a colour.
 STYLE = re.compile(r"\.(absolute|relative|top_\w+|left_\w+|right_\w+|bottom_\w+|inset_\w+|size_\w+|rounded\w*|"
                    r"border\w*|bg|shadow\w*|opacity|cursor_\w+|text_\w+|font_\w+|line_height|flex\w*|items_\w+|"
@@ -331,6 +332,8 @@ def block_patterns(index):
             continue  # only framework idiom (layout chains)
         if sum(signature_line(t) for t in sample) >= 0.7 * size:
             continue  # typed parameter list or struct field declarations
+        if single_call_block(sample):
+            continue  # a single function/method call wrapped over multiple lines
         for r, i in distinct:
             covered.update((r, i + k) for k in range(size))
             index.end[(r, index.lines[r][i][0])] = index.lines[r][min(i + size, len(index.lines[r])) - 1][0]
@@ -346,11 +349,23 @@ PARAM_TYPE = re.compile(
     r"(?:usize|isize|bool|str|char|f32|f64|[iu](?:8|16|32|64|128)|"
     r"string|number|boolean|void|any|unknown|never|int|float|bytes|dict|list|set|tuple)\b)"
 )
+CALL_HEADER = re.compile(r"^(?:(?:let(?:\s+mut)?|const|var)\s+[^;{}]*=\s*|return\s+)?[\w.:?<>]+\s*\($")
+SIMPLE_ARG = re.compile(
+    r"""^(?:(?:&\s*(?:mut\s+)?)?[\w."']+(?:\(\))?|[\w.]+\s*[:=]\s*(?:&\s*(?:mut\s+)?)?[\w."']+(?:\(\))?)[,)]*;?$"""
+)
 
 
 def signature_line(text):
     m = PARAM_DECL.match(text)
     return bool(m and PARAM_TYPE.match(m.group(1).strip()))
+
+
+def single_call_block(sample):
+    """A single call wrapped over several lines is reuse, not a copied sequence."""
+    if not sample or not CALL_HEADER.match(sample[0]):
+        return False
+    args = sample[1:]
+    return bool(args) and sum(bool(SIMPLE_ARG.match(t)) for t in args) >= 0.8 * len(args)
 
 
 def common_line(text, arch):
@@ -476,7 +491,7 @@ def briefing(found, arch, trigger, created=()):
     if found:
         lines.append("Repeated patterns that involve this session's files:")
         for n, f in enumerate(found[:PER_ROUND], 1):
-            lines.append(f"{n}. {f.problem} -> {f.fix}")
+            lines.append(f"{n}. {f}")
         if len(found) > PER_ROUND:
             lines.append(f"(+{len(found) - PER_ROUND} in the next round or in patterns.py --all)")
         lines.append(
@@ -586,6 +601,63 @@ def hook_selftest():
                 sig_patterns = findings(repo, Architecture(repo), {"src/screens/sigs.rs": None}, {".rs"})
                 if sig_patterns:
                     problems.append(f"Rust parameter list triggered pattern: {[str(f) for f in sig_patterns]!r}")
+                for call_name in ("call_a.rs", "call_b.rs"):
+                    (repo / "src" / "screens" / call_name).write_text(
+                        "fn draw() {\n"
+                        "    let pair = self.detail_transition.wrap_views(\n"
+                        "        detail_visible,\n"
+                        "        &self.host_bounds,\n"
+                        "        self.palette,\n"
+                        "        window,\n"
+                        "        list_view,\n"
+                        "        detail_view,\n"
+                        "        leaving_view,\n"
+                        "    );\n"
+                        "}\n",
+                        encoding="utf-8",
+                    )
+                call_patterns = findings(repo, Architecture(repo), {"src/screens/call_a.rs": None}, {".rs"})
+                if call_patterns:
+                    problems.append(f"Multi-line single call triggered pattern: {[str(f) for f in call_patterns]!r}")
+                for ui_name in ("ui_ctx_a.rs", "ui_ctx_b.rs"):
+                    (repo / "src" / "screens" / ui_name).write_text(
+                        "fn sync_panel(self_ref: &Self, window: &mut Window) {\n"
+                        "    let palette = self.palette;\n"
+                        "    let frame_bounds = *self.host_bounds.borrow();\n"
+                        "    let animated = animations_enabled(palette.animate);\n"
+                        "    let surface = if palette.glass_on() { palette.box_fill() } else { palette.bg };\n"
+                        "    let edge = palette.glass_edge(palette.box_border);\n"
+                        "    self.transition.prepare(frame_bounds, surface, edge, animated, window);\n"
+                        "}\n",
+                        encoding="utf-8",
+                    )
+                ui_found = findings(repo, Architecture(repo), {"src/screens/ui_ctx_a.rs": None}, {".rs"})
+                if not ui_found or "src/components/visual.rs" not in ui_found[0].fix:
+                    problems.append(f"GPUI context block did not route to visual.rs: {[str(f) for f in ui_found]!r}")
+                else:
+                    brief_text = briefing(ui_found, Architecture(repo), "edited ui_ctx_a.rs")
+                    brief_line = next((l for l in brief_text.splitlines() if l.startswith("1. ")), "")
+                    if "ui_ctx_a.rs:" not in brief_line or "[pattern]" not in brief_line:
+                        problems.append(f"briefing() line missing path/tag for --accept: {brief_line!r}")
+                    stripped = re.sub(r'"[^"]*"', "", brief_line)
+                    bad_accept = subprocess.run(
+                        [sys.executable, str(HERE / "patterns.py"), "--accept", stripped, "--reason", "stripped test"],
+                        capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo,
+                    )
+                    if bad_accept.returncode == 0:
+                        problems.append("quote-stripped --accept exited 0, expected failure")
+                    good_accept = subprocess.run(
+                        [sys.executable, str(HERE / "patterns.py"), "--accept", "-", "--reason", "stdin accept test"],
+                        input=brief_line, capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo,
+                    )
+                    if good_accept.returncode != 0:
+                        problems.append(f"stdin --accept failed: {good_accept.stderr or good_accept.stdout}")
+                    after_accept = subprocess.run(
+                        [sys.executable, str(HERE / "patterns.py"), "src/screens/ui_ctx_a.rs"],
+                        capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo,
+                    )
+                    if "ui_ctx_a.rs:" in after_accept.stdout:
+                        problems.append(f"finding still active after --accept -: {after_accept.stdout}")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:
@@ -599,7 +671,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("files", nargs="*")
     parser.add_argument("--all", action="store_true", help="the whole repository")
-    parser.add_argument("--accept", help="line of a finding that is not a repetition to extract")
+    parser.add_argument("--accept", help="finding line (or '-' to read from stdin) that is not a repetition to extract")
     parser.add_argument("--reason", default="")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--record", action="store_true", help="with --selftest: records the output as expected")
