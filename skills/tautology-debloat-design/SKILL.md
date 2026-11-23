@@ -40,7 +40,7 @@ Evaluate every section across 5 axes:
 2. **Unnecessary visual repetition:** stacked title + subtitle + explanatory card saying the same thing, repeated dividers, repeated decorative icons/chips, or inline style chains that belong in a shared component.
 3. **Excessive padding & screen fill:** oversized blank spacers inside gap-spaced containers, heavy nested paddings, redundant explanatory boxes inflating height.
 4. **Elements without clear purpose:** ornamental pills, labels/captions that restate what the control already shows, noisy secondary notes (remove them, or move genuinely helpful edge-case hints to the project's existing tooltip control — only if the project already uses tooltips).
-5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow.
+5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow — including **stacked/exposed filter rows** (secondary filter/sort dropdowns plus a permanent strip of status pills), **fixed-width filter/sort triggers** eating toolbar space, and **multiple competing solid primary accents** (save solid primary fill for the main CTA; keep selected filters and view toggles on a neutral/surface fill, and fold secondary filters into one `Filters` menu with active-only removable chips).
 
 If the screen is already clean and balanced across all 5 axes, report what was checked and **change nothing**.
 

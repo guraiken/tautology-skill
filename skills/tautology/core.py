@@ -219,6 +219,8 @@ DEFAULTS = {
         "max_icons": 10,
         "max_header_stack": 2,
         "max_info_hints": 6,
+        "max_primary_accents": 1,
+        "max_exposed_filters": 3,
         "style_tokens": [],
         "states_file": "",
         "capture_command": "",

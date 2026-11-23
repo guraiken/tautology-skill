@@ -61,6 +61,27 @@ DIVIDER_RE = re.compile(
 BADGE_RE = re.compile(r"\b(?:visual::tag|tag|badge|chip|status_pill)\s*\(|<(?:Badge|Chip|Tag)\b")
 ICON_RE = re.compile(r"\b(?:visual::icon|icon)\s*\(|<(?:[A-Z]\w*Icon|Icon)\b")
 INFO_HINT_RE = re.compile(r"\binfo_hint\s*\(|<(?:InfoHint|HelpTip|HintIcon)\b")
+PRIMARY_ACCENT_RE = re.compile(
+    r"\bprimary_button\s*\("
+    r"|\.bg\(\s*\w+\.primary\s*\)"
+    r"|\.pill\([^;\n]*,\s*\w+\.primary\b"
+    r"|\bvariant\s*=\s*[\"']primary[\"']"
+    r"|\bbg-primary\b(?!/)"
+    r"|<PrimaryButton\b"
+    r"|\.setProperty\(\s*[\"']primary[\"']\s*,\s*True\s*\)"
+)
+FILTER_TRIGGER_RE = re.compile(
+    r"\b(?:menu_trigger|menu_trigger_with_state)\s*\("
+    r"|<(?:Select|select|Dropdown|FilterSelect|SortSelect)\b"
+    r"|\bQComboBox\s*\("
+)
+FILTER_CHIP_RE = re.compile(r"\bfilter_chip\s*\(|<(?:FilterChip|FilterPill|ToggleButton)\b")
+MODAL_CALLEE_RE = re.compile(r"(?:^|_)(?:modal|dialog|overlay|popup)(?:s|_|$)", re.I)
+FIXED_TRIGGER_WIDTH_RE = re.compile(
+    r"\.w\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)"
+    r"|\bw-\[(\d+(?:\.\d*)?)px\]"
+    r"|\.setFixedWidth\(\s*(\d+)\s*\)"
+)
 LOOP_START_RE = re.compile(r"^\s*(?:for\s+\w|\.for_each\s*\(|\.map\(\s*\|)")
 SPACER_RE = re.compile(
     r"\bdiv\(\)\s*\.(?:h|w)\(px\((?P<px>\d+(?:\.\d*)?)\)\)\s*(?:[,;)]|$)|<Spacer\b|\.addSpacing\("
@@ -428,7 +449,11 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
     spacers, gap_calls = [], 0
     header_runs, current_run, raw_calls = [], [], []
     inline_chains = defaultdict(list)
+    fixed_width_triggers = []
     loop_indent = None
+    loop_bp = ()
+    loop_primary_seen = False
+    loop_filter_chip_seen = False
     card_lines = set()
 
     for number in range(start, end + 1):
@@ -442,8 +467,13 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
 
         if loop_indent is not None and indent <= loop_indent and stripped not in ("{", "}", ");", ")"):
             loop_indent = None
+            loop_primary_seen = False
+            loop_filter_chip_seen = False
         if loop_indent is None and LOOP_START_RE.search(raw):
             loop_indent = indent
+            loop_bp = tuple((f[1], f[2]) for f in branch_stack)
+            loop_primary_seen = False
+            loop_filter_chip_seen = False
         in_loop = loop_indent is not None and indent > loop_indent
 
         continued = _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix)
@@ -481,7 +511,14 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
 
         if ".gap(" in raw or re.search(r"\bgap-\d+", raw):
             gap_calls += 1
-        if not in_loop:
+        if in_loop:
+            if not loop_primary_seen and PRIMARY_ACCENT_RE.search(raw):
+                raw_items["primary_accents"].append((loop_bp, number))
+                loop_primary_seen = True
+            if not loop_filter_chip_seen and FILTER_CHIP_RE.search(raw):
+                raw_items["filter_chip_strips"].append((loop_bp, number))
+                loop_filter_chip_seen = True
+        else:
             if DIVIDER_RE.search(raw):
                 raw_items["dividers"].append((eval_bp, number))
             if BADGE_RE.search(raw):
@@ -490,6 +527,16 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
                 raw_items["icons"].append((eval_bp, number))
             if INFO_HINT_RE.search(raw):
                 raw_items["info_hints"].append((eval_bp, number))
+            if PRIMARY_ACCENT_RE.search(raw):
+                raw_items["primary_accents"].append((eval_bp, number))
+            if FILTER_TRIGGER_RE.search(raw):
+                raw_items["filter_triggers"].append((eval_bp, number))
+                window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
+                wm = FIXED_TRIGGER_WIDTH_RE.search(window_lines)
+                if wm:
+                    width = int(float(wm.group(1) or wm.group(2) or wm.group(3)))
+                    if width >= 140:
+                        fixed_width_triggers.append((number, width))
             spacer_m = SPACER_RE.search(raw)
             if spacer_m and float(spacer_m.group("px") or 20) >= 16:
                 spacers.append(number)
@@ -535,7 +582,10 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
         header_runs.append(current_run)
 
     clean_bp = lambda bp: tuple(pair for pair in bp if pair[0] in confirmed)
-    count_keys = ("cards", "dividers", "badges", "icons", "info_hints")
+    count_keys = (
+        "cards", "dividers", "badges", "icons", "info_hints",
+        "primary_accents", "filter_triggers", "filter_chip_strips",
+    )
     items = {k: [n for _, n in raw_items[k]] for k in count_keys}
     counts = {k: _aggregate_branches([(clean_bp(bp), 1) for bp, _ in raw_items[k]]) for k in count_keys}
     calls = [(qual, target, d, ln, clean_bp(bp), nh) for qual, target, d, ln, bp, nh in raw_calls]
@@ -544,6 +594,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
         "start": start, "end": end, "name": name,
         "max_depth": max_depth, "max_depth_line": max_depth_line,
         **items, "counts": counts, "spacers": spacers,
+        "fixed_width_triggers": fixed_width_triggers,
         "gap_calls": gap_calls, "header_runs": header_runs,
         "inline_chains": inline_chains, "calls": calls,
         "touched": any(look(n) for n in range(start, end + 1)),
@@ -572,6 +623,10 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out):
          "drop decorative icons where labels already explain the element"),
         ("info_hints", "max_info_hints", "info_hint badges in one view",
          "make labels self-explanatory and keep help icons only for non-obvious behavior"),
+        ("primary_accents", "max_primary_accents", "competing primary accents in one view",
+         "keep solid primary accent for the main CTA only; use neutral/surface fill for selected filters and toggles"),
+        ("filter_triggers", "max_exposed_filters", "exposed filter/sort dropdowns in one view",
+         "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set"),
     ]
     for field, limit_key, desc, fix in count_specs:
         items = stats[field]
@@ -579,6 +634,21 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out):
         limit = cfg[limit_key]
         if eff > limit and any(look(n) for n in items):
             out.append(core.Finding(rel, items[0], "design", f"{name}: {eff} {desc} (limit {limit})", fix))
+    if stats["counts"]["filter_triggers"] >= 1 and stats["counts"]["filter_chip_strips"] >= 1:
+        hit_lines = stats["filter_triggers"] + stats["filter_chip_strips"]
+        if any(look(n) for n in hit_lines):
+            out.append(core.Finding(
+                rel, min(hit_lines), "design",
+                f"{name}: stacked filter controls ({stats['counts']['filter_triggers']} trigger(s) + exposed filter-chip strip)",
+                "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set",
+            ))
+    for line_no, width in stats["fixed_width_triggers"]:
+        if look(line_no):
+            out.append(core.Finding(
+                rel, line_no, "design",
+                f"{name}: fixed-width filter/sort trigger ({width}px) crowds toolbar",
+                "size trigger to content or consolidate secondary filters into a single Filters menu",
+            ))
     if stats["gap_calls"] > 0 and len(stats["spacers"]) >= 2 and any(look(n) for n in stats["spacers"]):
         out.append(core.Finding(
             rel, stats["spacers"][0], "design",
@@ -747,8 +817,14 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
                 if resolved:
                     called_anywhere.add(resolved)
 
-    count_keys = ("cards", "dividers", "badges", "icons", "info_hints")
+    count_keys = (
+        "cards", "dividers", "badges", "icons", "info_hints",
+        "primary_accents", "filter_triggers", "filter_chip_strips",
+    )
     hint_idx = count_keys.index("info_hints")
+    primary_idx = count_keys.index("primary_accents")
+    trigger_idx = count_keys.index("filter_triggers")
+    strip_idx = count_keys.index("filter_chip_strips")
     memo = {}
 
     def compose(node_key, stack_path=()):
@@ -758,7 +834,7 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
         m_data = metas_by_rel.get(node_rel)
         s = m_data["by_name"].get(fn_name) if m_data else None
         if not s or node_key in stack_path or len(stack_path) >= 4:
-            return 0, [fn_name], [0] * 5, False, False
+            return 0, [fn_name], [0] * len(count_keys), False, False
         max_d = s["max_depth"]
         best_chain = [fn_name]
         base_totals = [s["counts"][k] for k in count_keys]
@@ -782,6 +858,10 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
             adj = list(ctotals)
             if none_hint:
                 adj[hint_idx] = 0
+            if MODAL_CALLEE_RE.search(callee_key[1]):
+                adj[primary_idx] = 0
+                adj[trigger_idx] = 0
+                adj[strip_idx] = 0
             call_entries.append((bp, adj))
         extra = _aggregate_branches(call_entries, widths=len(count_keys))
         seq_totals = [base_totals[i] + extra[i] for i in range(len(count_keys))]
@@ -791,10 +871,14 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
         return res
 
     composed_specs = [
-        ("cards", "max_cards", "boxed cards/panels across composed view",
+        ("cards", "max_cards", 0, "boxed cards/panels across composed view",
          "group sections with whitespace and typography instead of wrapping every block in a card"),
-        ("info_hints", "max_info_hints", "info_hint badges across composed view",
+        ("info_hints", "max_info_hints", 0, "info_hint badges across composed view",
          "make labels self-explanatory and cut redundant help icons"),
+        ("primary_accents", "max_primary_accents", 1, "competing primary accents across composed view",
+         "keep solid primary accent for the main CTA only; use neutral/surface fill for selected filters and toggles"),
+        ("filter_triggers", "max_exposed_filters", 0, "exposed filter/sort dropdowns across composed view",
+         "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set"),
     ]
     for root_name, root in cur_meta["by_name"].items():
         if not root["calls"]:
@@ -813,15 +897,22 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
                 f"{' -> '.join(best_chain)}: composed hierarchy of {max_d} nested styled boxes (limit {cfg['max_container_depth']})",
                 "flatten helper wrappers or remove inner card borders",
             ))
-        for key, limit_key, desc, fix in composed_specs:
+        for key, limit_key, extra_allowance, desc, fix in composed_specs:
             pos = count_keys.index(key)
-            limit = cfg[limit_key]
+            limit = cfg[limit_key] + extra_allowance
             if totals[pos] > limit and root["counts"][key] <= limit:
                 out.append(core.Finding(
                     rel, root["start"], "design",
                     f"{root_name} (composed): {totals[pos]} {desc} (limit {limit})",
                     fix,
                 ))
+        local_stacked = root["counts"]["filter_triggers"] >= 1 and root["counts"]["filter_chip_strips"] >= 1
+        if totals[trigger_idx] >= 1 and totals[strip_idx] >= 1 and not local_stacked:
+            out.append(core.Finding(
+                rel, root["start"], "design",
+                f"{root_name} (composed): stacked filter controls across composed view ({totals[trigger_idx]} trigger(s) + exposed filter-chip strip)",
+                "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set",
+            ))
 
 
 def _check_css_line(rel, number, raw, tokens, out):
@@ -1143,6 +1234,22 @@ def selftest():
         for needed in ("composed hierarchy", "boxed cards/panels across composed view", "info_hint badges across composed view"):
             if needed not in modular_text:
                 problems.append(f"modular_dirty.rs missing expected finding {needed!r}:\n{modular_text}")
+
+        # Stacked/exposed filter toolbar + competing solid primary accents + fixed-width triggers.
+        dirty_bar = scan_file(repo / "src" / "screens" / "toolbar_clutter.rs", only=None, tokens=tokens, checks={"design"})
+        dirty_bar_text = "\n".join(str(f) for f in dirty_bar)
+        for needed in (
+            "competing primary accents",
+            "stacked filter controls across composed view",
+            "fixed-width filter/sort trigger (175px)",
+            "fixed-width filter/sort trigger (199px)",
+        ):
+            if needed not in dirty_bar_text:
+                problems.append(f"toolbar_clutter.rs missing expected finding {needed!r}:\n{dirty_bar_text}")
+
+        clean_bar = scan_file(repo / "src" / "screens" / "toolbar_clean.rs", only=None, tokens=tokens, checks=CHECKS)
+        if clean_bar:
+            problems.append(f"toolbar_clean.rs reported false positive(s): {[str(f) for f in clean_bar]!r}")
 
         # W1 (multi-line None) + W2 (if / else if / else + early return) must not false-positive.
         branched = scan_file(repo / "src" / "screens" / "branched_clean.rs", only=None, tokens=tokens, checks={"design"})
