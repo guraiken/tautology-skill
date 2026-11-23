@@ -79,7 +79,10 @@ FILTER_TRIGGER_RE = re.compile(
     r"|\bQComboBox\s*\("
 )
 FILTER_CHIP_RE = re.compile(r"\bfilter_chip\s*\(|<(?:FilterChip|FilterPill|ToggleButton)\b")
-MODAL_CALLEE_RE = re.compile(r"(?:^|_)(?:modal|dialog|overlay|popup)(?:s|_|$)", re.I)
+MODAL_CALLEE_RE = re.compile(
+    r"(?i:(?:^|_)(?:modal|dialog|overlay|popup|layer|drawer|sheet)(?:s|_|$))"
+    r"|(?<=[a-z0-9])(?:Modal|Dialog|Overlay|Popup|Layer|Drawer|Sheet)(?:s|$|(?=[A-Z_]))"
+)
 FIXED_TRIGGER_WIDTH_RE = re.compile(
     r"\.w\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)"
     r"|\bw-\[(\d+(?:\.\d*)?)px\]"
@@ -333,8 +336,75 @@ def _aggregate_branches(entries, widths=1):
     return base
 
 
-def _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix):
-    """Pops/advances branch_stack frames ([indent, gid, arm, kind, has_else, has_return]) for current line."""
+_BRANCH_KEYWORDS = {"let", "true", "false", "True", "False", "None", "null", "undefined"}
+
+
+def _branch_cond(raw, suffix):
+    """Extracts a canonical (group_key, arm_tag, is_binary) for simple single-subject if/elif headers."""
+    clean = re.sub(r"#.*$" if suffix == ".py" else r"//.*$", "", raw).strip()
+    if suffix == ".py":
+        m = re.match(r"^(?:el)?if\b\s*(.+?)\s*:\s*$", clean)
+    else:
+        m = re.search(r"(?:^|[\s=}(])(?:else\s+)?if\b\s*(.+?)\s*\{\s*$", clean)
+    if not m:
+        return None
+    cond = m.group(1).strip()
+    while cond.startswith("(") and cond.endswith(")"):
+        depth, balanced = 0, True
+        for i, ch in enumerate(cond):
+            depth += 1 if ch == "(" else (-1 if ch == ")" else 0)
+            if depth == 0 and i < len(cond) - 1:
+                balanced = False
+                break
+        if not balanced or depth != 0:
+            break
+        cond = cond[1:-1].strip()
+    if not cond or re.search(r"&&|\|\||\band\b|\bor\b|[;?]", cond):
+        return None
+    opt_let = re.fullmatch(r"let\s+(Some\s*\([^)]*\)|None)\s*=\s*&?(?:mut\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)", cond)
+    if opt_let:
+        return (("opt", opt_let.group(2)), 0 if opt_let.group(1) == "None" else 1, True)
+    opt_call = re.fullmatch(r"(!)?\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.(is_some|is_none)\(\)", cond)
+    if opt_call:
+        arm = 1 if opt_call.group(3) == "is_some" else 0
+        if opt_call.group(1):
+            arm = 1 - arm
+        return (("opt", opt_call.group(2)), arm, True)
+    py_none = re.fullmatch(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+is\s+(not\s+)?None", cond)
+    if py_none:
+        return (("opt", py_none.group(1)), 1 if py_none.group(2) else 0, True)
+    eq_m = re.fullmatch(
+        r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*===?\s*([A-Za-z0-9_:\.\-]+|\"[^\"\n]*\"|'[^'\n]*')",
+        cond,
+    )
+    if eq_m:
+        return (("eq", eq_m.group(1)), eq_m.group(2), False)
+    bool_m = re.fullmatch(r"(?:(!)\s*|(not)\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)", cond)
+    if bool_m and bool_m.group(3) not in _BRANCH_KEYWORDS:
+        neg = bool(bool_m.group(1) or bool_m.group(2))
+        return (("bool", bool_m.group(3)), 0 if neg else 1, True)
+    return None
+
+
+def _invalidate_cond_groups(cond_groups, code):
+    """Drops correlated condition groups whose subject variable is assigned or mutated on this line."""
+    if not cond_groups:
+        return
+    mutated = set()
+    for am in re.finditer(r"(?<![=!<>])\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?:=|\+=|-=|\*=|/=)(?!=|>)", code):
+        mutated.add(am.group(1))
+    for mm in re.finditer(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.(?:take|replace|insert|clear|push|pop|set_\w+)\s*\(", code):
+        mutated.add(mm.group(1))
+    if not mutated:
+        return
+    for key in list(cond_groups):
+        expr = key[1]
+        if any(expr == v or expr.startswith(v + ".") or v.startswith(expr + ".") for v in mutated):
+            del cond_groups[key]
+
+
+def _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix, raw="", cond_groups=None):
+    """Pops/advances branch_stack frames ([indent, gid, arm, kind, has_else, has_return, cond_meta]) for current line."""
     for idx in range(len(branch_stack) - 1, -1, -1):
         frame = branch_stack[idx]
         if (frame[3] == "match" and indent <= frame[0] + 4 and "=>" in stripped
@@ -351,7 +421,35 @@ def _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix):
             break
         if top[3] == "if" and (re.match(r"^(?:\}\s*)?(?:else\b|elif\b)", stripped)
                                or (suffix in core.JSX and re.match(r"^\)\s*:\s*\(", stripped))):
-            top[2] += 1
+            meta = top[6]
+            is_plain_else = bool(re.match(r"^(?:\}\s*)?else\s*[:{]?\s*$", stripped)) or (
+                suffix in core.JSX and bool(re.match(r"^\)\s*:\s*\(", stripped))
+            )
+            if meta is not None and is_plain_else and meta[1]:
+                # Plain else of a binary (opt/bool) correlated condition maps to its exact complement.
+                top[2] = 1 - top[2]
+                if cond_groups and meta[0] in cond_groups:
+                    cond_groups[meta[0]][3].add(top[2])
+            elif meta is not None and not is_plain_else and cond_groups and meta[0] in cond_groups:
+                elif_cond = _branch_cond(raw, suffix)
+                grp = cond_groups[meta[0]]
+                if elif_cond and elif_cond[0] == meta[0]:
+                    arm_tag = elif_cond[1]
+                    if arm_tag not in grp[1]:
+                        grp[1][arm_tag] = grp[2]
+                        grp[2] += 1
+                    top[2] = grp[1][arm_tag]
+                else:
+                    top[2] = grp[2]
+                    grp[2] += 1
+                grp[3].add(top[2])
+            elif meta is not None and cond_groups and meta[0] in cond_groups:
+                grp = cond_groups[meta[0]]
+                top[2] = grp[2]
+                grp[2] += 1
+                grp[3].add(top[2])
+            else:
+                top[2] += 1
             top[4] = True
             confirmed.add(top[1])
             return True
@@ -361,7 +459,19 @@ def _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix):
             popped = branch_stack.pop()
             if popped[3] == "if" and popped[5] and not popped[4]:
                 confirmed.add(popped[1])
-                branch_stack.append([popped[0], popped[1], 1, "ret_rest", True, False])
+                meta = popped[6]
+                if meta is not None and meta[1]:
+                    rest_arm = 1 - popped[2]
+                    if cond_groups and meta[0] in cond_groups:
+                        cond_groups[meta[0]][3].add(rest_arm)
+                elif meta is not None and cond_groups and meta[0] in cond_groups:
+                    grp = cond_groups[meta[0]]
+                    rest_arm = grp[2]
+                    grp[2] += 1
+                    grp[3].add(rest_arm)
+                else:
+                    rest_arm = popped[2] + 1
+                branch_stack.append([popped[0], popped[1], rest_arm, "ret_rest", True, False, None])
             continue
         break
     return False
@@ -446,8 +556,9 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
 def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
     cfg = core.C.design
     stack = []  # [[(nesting, indent), line_number, flags, card_counted, is_jsx]]
-    branch_stack = []  # [[indent, group_id, arm_idx, kind, has_else, has_return]]
+    branch_stack = []  # [[indent, group_id, arm_idx, kind, has_else, has_return, cond_meta]]
     confirmed = set()
+    cond_groups = {}  # cond_key -> [gid, arm_map, next_arm_id, seen_arms]
     delim_state = [0, 0]  # [paren_bracket_depth, jsx_depth]
     next_group = 1
     max_depth, max_depth_line = 0, start
@@ -482,8 +593,9 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
             loop_filter_chip_seen = False
         in_loop = loop_indent is not None and indent > loop_indent
 
-        continued = _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix)
+        continued = _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix, raw, cond_groups)
         code = _blank_literals(raw)
+        _invalidate_cond_groups(cond_groups, code)
         if branch_stack and branch_stack[-1][3] == "if" and indent <= branch_stack[-1][0] + 4 and re.search(r"\breturn\b", code):
             branch_stack[-1][5] = True
 
@@ -494,9 +606,9 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
             gid = next_group
             next_group += 1
             confirmed.add(gid)
-            opened_branch = ("single_ret", gid)
+            opened_branch = ("single_ret", gid, 0, None)
         elif re.search(r"\bmatch\b.*\{\s*$", code) or (suffix == ".py" and re.match(r"^match\b.*:\s*$", stripped)):
-            opened_branch = ("match", next_group)
+            opened_branch = ("match", next_group, 0, None)
             confirmed.add(next_group)
             next_group += 1
         elif not continued and (
@@ -504,10 +616,40 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
             or (suffix == ".py" and re.match(r"^if\b.*:\s*$", stripped))
             or (suffix in core.JSX and re.search(r"\{\s*[^?{}]+\?\s*\(\s*$", code))
         ):
-            opened_branch = ("if", next_group)
-            if suffix in core.JSX and "?" in code:
-                confirmed.add(next_group)
-            next_group += 1
+            cond_info = None if (suffix in core.JSX and "?" in code) else _branch_cond(raw, suffix)
+            active_gids = {f[1] for f in branch_stack}
+            if cond_info is not None:
+                ckey, arm_tag, is_binary = cond_info
+                existing = cond_groups.get(ckey)
+                if existing is not None and existing[0] not in active_gids:
+                    gid, arm_map, next_arm, seen_arms = existing
+                    if is_binary:
+                        arm = arm_tag
+                    else:
+                        if arm_tag not in arm_map:
+                            arm_map[arm_tag] = next_arm
+                            existing[2] = next_arm + 1
+                        arm = arm_map[arm_tag]
+                    seen_arms.add(arm)
+                    if len(seen_arms) >= 2:
+                        confirmed.add(gid)
+                    opened_branch = ("if", gid, arm, (ckey, is_binary))
+                else:
+                    gid = next_group
+                    next_group += 1
+                    if is_binary:
+                        arm = arm_tag
+                        cond_groups[ckey] = [gid, {0: 0, 1: 1}, 2, {arm}]
+                    else:
+                        arm = 0
+                        cond_groups[ckey] = [gid, {arm_tag: 0}, 1, {0}]
+                    opened_branch = ("if", gid, arm, (ckey, is_binary))
+            else:
+                gid = next_group
+                next_group += 1
+                if suffix in core.JSX and "?" in code:
+                    confirmed.add(gid)
+                opened_branch = ("if", gid, 0, None)
 
         line_bp = tuple((f[1], f[2]) for f in branch_stack)
         if opened_branch and opened_branch[0] == "single_ret":
@@ -574,11 +716,11 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
         )
 
         if opened_branch:
-            kind, gid = opened_branch
+            kind, gid, arm, cond_meta = opened_branch
             if kind == "single_ret":
-                branch_stack.append([indent, gid, 1, "ret_rest", True, False])
+                branch_stack.append([indent, gid, 1, "ret_rest", True, False, None])
             else:
-                branch_stack.append([indent, gid, 0, kind, kind != "if" or (suffix in core.JSX and "?" in code), False])
+                branch_stack.append([indent, gid, arm, kind, kind != "if" or (suffix in core.JSX and "?" in code), False, cond_meta])
 
         if _is_text_stack_line(lines, number, raw, suffix):
             current_run.append(number)
@@ -596,12 +738,18 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
     )
     items = {k: [n for _, n in raw_items[k]] for k in count_keys}
     counts = {k: _aggregate_branches([(clean_bp(bp), 1) for bp, _ in raw_items[k]]) for k in count_keys}
+    local_entries = []
+    for idx, k in enumerate(count_keys):
+        for bp, _ in raw_items[k]:
+            vec = [0] * len(count_keys)
+            vec[idx] = 1
+            local_entries.append((clean_bp(bp), vec))
     calls = [(qual, target, d, ln, clean_bp(bp), nh) for qual, target, d, ln, bp, nh in raw_calls]
 
     return {
         "start": start, "end": end, "name": name,
         "max_depth": max_depth, "max_depth_line": max_depth_line,
-        **items, "counts": counts, "spacers": spacers,
+        **items, "counts": counts, "local_entries": local_entries, "spacers": spacers,
         "fixed_width_triggers": fixed_width_triggers,
         "gap_calls": gap_calls, "header_runs": header_runs,
         "inline_chains": inline_chains, "calls": calls,
@@ -845,8 +993,7 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
             return 0, [fn_name], [0] * len(count_keys), False, False
         max_d = s["max_depth"]
         best_chain = [fn_name]
-        base_totals = [s["counts"][k] for k in count_keys]
-        call_entries = []
+        entries = list(s["local_entries"])
         any_touched = s["touched"]
         local_deep = s["max_depth"] > cfg["max_container_depth"]
         child_deep = False
@@ -870,9 +1017,8 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
                 adj[primary_idx] = 0
                 adj[trigger_idx] = 0
                 adj[strip_idx] = 0
-            call_entries.append((bp, adj))
-        extra = _aggregate_branches(call_entries, widths=len(count_keys))
-        seq_totals = [base_totals[i] + extra[i] for i in range(len(count_keys))]
+            entries.append((bp, adj))
+        seq_totals = _aggregate_branches(entries, widths=len(count_keys))
         res = (max_d, best_chain, seq_totals, any_touched, (any_touched and not local_deep and not child_deep))
         if not stack_path:
             memo[node_key] = res
@@ -1575,6 +1721,105 @@ def selftest():
         kit_out = "\n".join(str(f) for f in scan_file(kit_rs, only=None, tokens=web_tokens, checks={"design"}))
         if "competing primary accents" in kit_out:
             problems.append(f"component factory fn primary_button falsely triggered competing primary accents:\n{kit_out}")
+
+        # Regression: *_layer / *_drawer / *_sheet overlays, complementary single-subject if branches
+        # (is_some/else vs if let Some, eq variants), and early-return local vs callee unification
+        # must not false-positive; same-polarity / reassigned / non-modal helpers must still flag.
+        for hit in ("key_editor_layer", "notice_layer", "filter_drawer", "ConfirmDialog", "BottomSheet"):
+            if not MODAL_CALLEE_RE.search(hit):
+                problems.append(f"MODAL_CALLEE_RE failed to match overlay helper {hit!r}")
+        for non_hit in ("sound_player", "display_player", "toolbar", "render_filters"):
+            if MODAL_CALLEE_RE.search(non_hit):
+                problems.append(f"MODAL_CALLEE_RE falsely matched non-modal helper {non_hit!r}")
+
+        layered_rs = web_repo / "src" / "screens" / "layered_settings.rs"
+        layered_rs.parent.mkdir(parents=True, exist_ok=True)
+        layered_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "impl SettingsView {\n"
+            "    fn updates_section(&self, p: Palette) -> impl IntoElement {\n"
+            "        let check = if action_label.is_some() {\n"
+            "            kit::secondary_button(\"check\", p)\n"
+            "        } else {\n"
+            "            kit::primary_button(\"check\", p, true)\n"
+            "        };\n"
+            "        let mut row = div().child(check);\n"
+            "        if let Some(lbl) = action_label {\n"
+            "            row = row.child(kit::primary_button(\"act\", p, true).child(lbl));\n"
+            "        }\n"
+            "        row\n"
+            "    }\n"
+            "    fn tab_body(&self, p: Palette) -> impl IntoElement {\n"
+            "        let mut body = div();\n"
+            "        if self.tab == Tab::A {\n"
+            "            body = body.child(kit::primary_button(\"a\", p, true));\n"
+            "        }\n"
+            "        if self.tab == Tab::B {\n"
+            "            body = body.child(kit::primary_button(\"b\", p, true));\n"
+            "        }\n"
+            "        body\n"
+            "    }\n"
+            "    fn key_editor_layer(&self, p: Palette) -> Option<gpui::Div> {\n"
+            "        Some(div().child(kit::primary_button(\"save\", p, true)))\n"
+            "    }\n"
+            "    fn notice_layer(&self, p: Palette) -> Option<gpui::Div> {\n"
+            "        Some(div().child(kit::primary_button(\"ok\", p, true)))\n"
+            "    }\n"
+            "    fn filter_drawer(&self, p: Palette) -> Option<gpui::Div> {\n"
+            "        Some(div().child(kit::primary_button(\"apply\", p, true)))\n"
+            "    }\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        if self.blocked {\n"
+            "            return div().child(kit::primary_button(\"retry\", p, true));\n"
+            "        }\n"
+            "        let body = if self.show_updates {\n"
+            "            self.updates_section(p)\n"
+            "        } else {\n"
+            "            self.tab_body(p)\n"
+            "        };\n"
+            "        div()\n"
+            "            .child(body)\n"
+            "            .children(self.key_editor_layer(p))\n"
+            "            .children(self.notice_layer(p))\n"
+            "            .children(self.filter_drawer(p))\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        layered_out = "\n".join(str(f) for f in scan_file(layered_rs, only=None, tokens=web_tokens, checks={"design"}))
+        if "competing primary accents" in layered_out:
+            problems.append(f"layered_settings.rs falsely triggered competing primary accents:\n{layered_out}")
+
+        same_pol_rs = web_repo / "src" / "screens" / "same_polarity_dirty.rs"
+        same_pol_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "pub fn same_polarity(p: Palette, flag: bool) -> impl IntoElement {\n"
+            "    let mut row = div();\n"
+            "    if flag {\n"
+            "        row = row.child(kit::primary_button(\"a\", p, true));\n"
+            "    }\n"
+            "    if flag {\n"
+            "        row = row.child(kit::primary_button(\"b\", p, true));\n"
+            "    }\n"
+            "    row\n"
+            "}\n"
+            "pub fn reassigned_opt(p: Palette, mut opt: Option<&str>) -> impl IntoElement {\n"
+            "    let mut row = div();\n"
+            "    if opt.is_none() {\n"
+            "        row = row.child(kit::primary_button(\"a\", p, true));\n"
+            "    }\n"
+            "    opt = Some(\"x\");\n"
+            "    if let Some(_) = opt {\n"
+            "        row = row.child(kit::primary_button(\"b\", p, true));\n"
+            "    }\n"
+            "    row\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        same_pol_out = "\n".join(str(f) for f in scan_file(same_pol_rs, only=None, tokens=web_tokens, checks={"design"}))
+        for fn_expected in ("same_polarity: 2 competing primary accents", "reassigned_opt: 2 competing primary accents"):
+            if fn_expected not in same_pol_out:
+                problems.append(f"same_polarity_dirty.rs missed expected finding {fn_expected!r}:\n{same_pol_out}")
 
         # Regression: spacing.on_scale(spacing.nearest(v, steps), steps) invariant (no 38px->36px->36px loop)
         sample_steps = (2., 4., 6., 8., 10., 12., 14., 16., 20., 24.)
