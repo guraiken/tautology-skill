@@ -446,8 +446,29 @@ FIELD_RE = re.compile(r"<(?:input|textarea|select|Input|TextField|TextArea|Texta
 HELPER_ATTR = re.compile(r"\b(?:helperText|description|hint|helpText|caption)\s*=\s*[{\"']")
 HELPER_TAG = re.compile(r"<(?:small|FormDescription|FormHelperText|HelperText|Description|Hint)\b|"
                         r"<(?:p|span)\b[^>]*(?:help|hint|muted|description|caption)")
-ROW_CALL = re.compile(r"\b\w*(?:row|field|setting|option)\w*\(\s*\"[^\"]{1,40}\"\s*(?:,\s*\"([^\"]{12,})\")?")
+ROW_CALL = re.compile(r"\b\w*(?:row|field|setting|option)\w*\(\s*\"([^\"]{1,40})\"\s*(?:,\s*(.*))?")
+ROW_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[-_.:/][a-z0-9]+)+$")
+ROW_STR_ARG = re.compile(r"^(?:Some\(\s*)?\"([^\"]{12,})\"")
+ROW_LABEL_THEN_NONE = re.compile(r"^\"[^\"]{1,60}\"\s*,\s*(?:None|null|undefined)\b")
+ROW_LABEL_THEN_HELPER = re.compile(r"^\"[^\"]{1,60}\"\s*,\s*(?:Some\(\s*)?\"([^\"]{12,})\"")
 EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-⛿✨⭐⭕‼⁉❗❓➡]")
+
+
+def _row_helper(lines, number):
+    """Helper text carried by a row/field call, skipping an element ID passed as the first string."""
+    line = lines[number - 1]
+    row = ROW_CALL.search(line)
+    if not row:
+        return False, None
+    first, rest = row.group(1), (row.group(2) or "").strip()
+    if line.count("(") > line.count(")") and number < len(lines):
+        rest = (rest + " " + lines[number].strip()).strip()
+    if ROW_ID_RE.fullmatch(first) or (first.islower() and " " not in first and ROW_LABEL_THEN_NONE.match(rest)):
+        # ID-first signature: field_title("keyword-channels-info", "Somente estes canais", None | Some("..."))
+        m = ROW_LABEL_THEN_HELPER.match(rest)
+        return True, (m.group(1) if m else None)
+    m = ROW_STR_ARG.match(rest)
+    return True, (m.group(1) if m else None)
 
 
 def _helper_after(lines, number, suffix):
@@ -482,10 +503,10 @@ def clutter_checks(rel, lines, suffix, look, skip, test_from, out):
             if helper:
                 helpers[owner].append(helper)
         else:
-            row = ROW_CALL.search(line)  # GPUI/Qt: option_row("Sound", "Plays a short sound when...")
-            if row:
+            is_row, row_helper = _row_helper(lines, number)  # GPUI/Qt: option_row("Sound", "Plays a short sound...")
+            if is_row:
                 fields[owner].append(number)
-                if row.group(1) and is_prose(row.group(1)):
+                if row_helper and is_prose(row_helper):
                     helpers[owner].append(number)
         for literal in literals(line, suffix):
             if EMOJI_RE.search(literal) and (suffix in JSX or on_screen(line, literal)):

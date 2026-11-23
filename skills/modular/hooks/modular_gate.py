@@ -64,10 +64,29 @@ def load(name, path):
     return module
 
 
+def _arch_destinations(repo):
+    """Lightweight read of target N: lines from architecture.md without importing patterns.py."""
+    for folder in (".agents", ".claude"):
+        path = Path(repo) / folder / "modular" / "architecture.md"
+        if not path.is_file():
+            continue
+        dests = {}
+        try:
+            for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if raw.lstrip().startswith("#"):
+                    continue
+                m = re.match(r"^\s*target\s+(\d+)\s*:\s*(.*)$", raw, re.IGNORECASE)
+                if m and m.group(2).strip():
+                    dests[int(m.group(1))] = m.group(2).strip()
+        except OSError:
+            return []
+        return [dests[k] for k in sorted(dests)]
+    return []
+
+
 def reuse_reminder(repo):
-    patterns = load("patterns", SKILL / "patterns.py")
-    arch = patterns.Architecture(repo)
-    where = ", ".join(arch.destinations.values()) if arch.defined else "components/, scripts/, bin/, lib/ or utils/"
+    dests = _arch_destinations(repo)
+    where = ", ".join(dests) if dests else "components/, scripts/, bin/, lib/ or utils/"
     return (
         "Modular check (skill modular): before building a new component, modal, helper or script, ask yourself: "
         f"does this already exist in the repository? Search the shared locations ({where}) first and reuse or "
@@ -87,31 +106,6 @@ def is_script(rel, suffix):
         parts = {p.lower() for p in Path(rel).parts[:-1]}
         return bool(parts & SCRIPT_DIRS)
     return False
-
-
-def newly_created_files(repo, session, state, gate, reminded_file):
-    """New component or script files started in this session that have not been reminded yet."""
-    edited = state / f"{session}.files"
-    if not edited.is_file():
-        return []
-    patterns = load("patterns", SKILL / "patterns.py")
-    arch = patterns.Architecture(repo)
-    reminded = set(reminded_file.read_text(encoding="utf-8").splitlines()) if reminded_file.is_file() else set()
-    created = []
-    for raw in dict.fromkeys(edited.read_text(encoding="utf-8").splitlines()):
-        path = Path(raw)
-        if not raw or not path.is_file() or not path.resolve().is_relative_to(repo):
-            continue
-        rel = path.resolve().relative_to(repo).as_posix()
-        if rel in reminded or arch.excluded(rel) or patterns.core.is_test(rel) or rel.startswith((".claude/", ".agents/")):
-            continue
-        snap = gate.snapshot_of(state, session, path)
-        if snap.is_file() and snap.stat().st_size == 0 and (arch.is_component(rel) or is_script(rel, path.suffix.lower())):
-            created.append(rel)
-    if created:
-        with reminded_file.open("a", encoding="utf-8") as handle:
-            handle.write("\n".join(created) + "\n")
-    return created
 
 
 APPROVAL = re.compile(
@@ -151,7 +145,6 @@ def main():
     design_flag = state / f"{session}.design"
     tests_flag = state / f"{session}.tests_audit"
     prompt_stamp = state / f"{session}.prompt"
-    reminded_file = state / f"{session}.new_reminded"
     prompt = (payload.get("prompt") or payload.get("lastUserInput") or "").strip()
     is_skill_invoke = bool(SKILL_INVOKE.search(prompt))
     is_debloat = bool(DEBLOAT.search(prompt))

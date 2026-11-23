@@ -21,8 +21,8 @@ It runs by itself through hooks. You do not have to remember to call it.
 | Answers | the same sentence or idea in two paragraphs, a closing summary that retells the body | |
 | Copied code (modular) | 4+ chained calls repeated in 3+ files, 6+ equal lines in 2+ places, with a destination layer | the same card style chain in five screens |
 
-It reads Python, Rust, JS/TS and JSX/TSX. English is the default language; Portuguese is built in, and a
-project can enable both. Synonyms cross languages, so "Search" and "Find" count as the same idea.
+It reads Python, Rust, JS/TS and JSX/TSX. English and Portuguese are both on by default; a
+project can keep only one. Synonyms cross languages, so "Search" and "Find" count as the same idea.
 
 The hooks only point at candidates. Claude decides what is a defect, fixes it, or keeps it with a
 one-line reason.
@@ -43,19 +43,19 @@ Session state lives in `.git/tautology/` of your project and is never committed.
 
 ## Cost
 
-Measured with `claude plugin details` and on the bundled test cases.
+Measured on the skill manifests and the bundled test cases (~4 chars/token).
 
 | What | Tokens |
 |---|---|
-| Always in context (the two skill descriptions) | ~226 per session |
-| Loading the `tautology` skill (when Claude or you invoke it) | ~3.5k |
-| Loading the `modular` skill | ~1.2k |
+| Always in context (the four skill descriptions) | ~380 per session |
+| Loading the `tautology` skill (when invoked) | ~2.6k |
+| Loading `tautology-debloat-design` / `tautology-audit-tests` / `modular` | ~1.5k / ~1.0k / ~1.0k |
+| Loading `TICS.md` (only when an AI visual tic is flagged) | ~535 |
 | Hooks themselves | 0: they run outside the model |
-| A Stop report when something is found | ~750 for a screen with 8 findings, plus the turn Claude spends fixing them |
+| A Stop report when something is found | ~440–770 typical, plus the turn spent fixing it |
 
-An answer with nothing new to report costs nothing extra. Each hook takes about 0.7 s of local
-Python time (around 1 s when `bin/py.sh` has to look for the interpreter; set `TAUTOLOGY_PYTHON` to skip
-the search).
+An answer with nothing new to report costs nothing extra. Both `bin/py.sh` and `bin/py.cmd` cache the
+Python interpreter after the first run; set `TAUTOLOGY_PYTHON` to choose a specific interpreter.
 
 ## Install
 

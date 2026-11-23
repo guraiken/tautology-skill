@@ -10,7 +10,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -21,6 +23,44 @@ MODULAR = SKILL.parent / "modular" / "hooks" / "modular_gate.py"
 DESIGN_AUDIT = SKILL.parent / "tautology-debloat-design" / "design_audit.py"
 TEST_AUDIT = SKILL.parent / "tautology-audit-tests" / "test_audit.py"
 LIMIT = 8  # with the layout audit (4) a report stays near 12 lines
+STALE_SESSION_SECONDS = 14 * 86400
+GC_INTERVAL_SECONDS = 86400
+
+
+def _cleanup_stale_state(state, session):
+    """Prunes old per-session snapshots and markers at most once a day."""
+    stamp = state / ".last_gc"
+    now = time.time()
+    try:
+        if stamp.is_file() and (now - stamp.stat().st_mtime) < GC_INTERVAL_SECONDS:
+            return
+        stamp.write_text("", encoding="utf-8")
+        cutoff = now - STALE_SESSION_SECONDS
+        groups = {}
+        for entry in state.iterdir():
+            name = entry.name
+            if name.startswith(".") or "." not in name:
+                continue
+            sid = name.split(".", 1)[0]
+            if sid == session:
+                continue
+            groups.setdefault(sid, []).append(entry)
+        for entries in groups.values():
+            try:
+                if max(e.stat().st_mtime for e in entries) >= cutoff:
+                    continue
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=True)
+                    else:
+                        entry.unlink(missing_ok=True)
+                except OSError:
+                    continue
+    except OSError:
+        return
 
 
 def load(name, path):
@@ -297,6 +337,7 @@ def main():
         return 0
     repo = gate.repo_of(payload)
     session, state = gate.session_of(payload), gate.state_dir(repo)
+    _cleanup_stale_state(state, session)
     (state / f"{session}.ticfix").unlink(missing_ok=True)  # a new answer: its tic fix may be checked once
     files = _changed_since_last_stop(_edited_files(state, session, repo), state, session, repo)
     if not files and not _config_flag(repo, "hook_scan_answer", False):

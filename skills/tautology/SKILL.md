@@ -13,34 +13,37 @@ Here it is **a defect in any form**: UI text, test, component, script or the age
 - **By itself, before the answer:** `hooks/edit_gate.py` (PreToolUse) keeps a copy of each file before the
   session's first edit; at the end of the answer `hooks/stop_gate.py` scans only the lines the session
   changed (exiting immediately when no files were edited). By default, the automatic Stop hook reports
-  only objective tautologies (repeats, pleonasm, doubled words, self-confirming tests, comments restating
-  code) and skips chat-answer scanning, length/density bloat, and per-string `New UI texts` lists unless
-  enabled via `/tautology-debloat-design` or project settings (`hook_scan_answer`, `hook_bloat`,
-  `hook_review_new_ui_texts`). A new finding sends the answer back once; a finding already shown never
-  blocks again.
+  objective tautologies (repeats, pleonasm, doubled words, self-confirming tests, comments restating
+  code) and, when a UI file changed, the AI visual tics: a helper text under (almost) every field,
+  placeholder or subtitle that only wraps the label or title in filler ("Enter your…", "Manage your…
+  below"), decorative emoji, "Tip:"/"Note:" lines (a warning such as "cannot be undone" stays), a
+  tooltip or info icon on (almost) every toggle and field (icon-only buttons, links and shortcuts keep
+  theirs), decorative badges (hype word, emoji, status dot, gradient, pulse), footnotes (small muted
+  note after a component's or page's content; a site `<footer>`, legal text and state messages such
+  as empty or loading stay), cards nested in cards (JSX; other toolkits only past
+  `max_container_depth`) and too many dividers. Each
+  screen-level tic is one line, and only when the session's own lines add to it, so an edit elsewhere
+  on a cluttered screen does not block. When a tic is reported, the hook points to `TICS.md` (what to
+  use instead of each tic) and lists the tokens and components the screen already uses. The fix must
+  be built from those, not from a new default look. After the fix, the changed files get one style
+  check: a hardcoded color, size or radius, or a stock Tailwind color in a themed project, sends the
+  answer back once more. Chat-answer scanning, length/wordiness/density and per-string
+  `New UI texts` lists stay off unless enabled via `/tautology-debloat-design` or project settings
+  (`hook_scan_answer`, `hook_bloat`, `hook_review_new_ui_texts`). A new finding sends the answer back
+  once; a finding already shown never blocks again.
 - **By hand:** `python <skill dir>/hunt.py --diff` (`--all <file>` looks at the whole file; `--message <file>`
   looks at a text).
 - **By competency:** `/tautology:tautology copy` (or `code`, `tests`, `answer`, several with commas) runs
-  `hunt.py --diff --only <competencies>`. Without an argument it runs everything. `<skill dir>` is the
-  base directory shown when this skill loads.
-
-| Competency | Finding kind | Rules in |
-|---|---|---|
-| copy | `[copy]` | `copy_rules.py` |
-| code | `[code]` | `copy_rules.py`, `test_rules.py` and the dispatcher in `hunt.py` |
-| tests | `[test]` | `test_rules.py` |
-| answer | `[answer]` | `answer_rules.py` |
-
-The shared part (settings, findings, accepted findings, per-language word lists, literal reading per
-programming language, changed lines) lives in `core.py`. `hunt.py` dispatches and holds the CLI and selftest.
+  `hunt.py --diff --only <competencies>` (finding kinds `[copy]`, `[code]`, `[test]`, `[answer]`).
+  Without an argument it runs everything. `<skill dir>` is the base directory shown when this skill loads.
 
 `hunt.py` points at candidates; you decide, with the rules below. What it already understands:
 
 - **Programming languages:** Python, Rust, JS/TS and JSX/TSX. In JSX, text between tags counts as screen
   text and `title=` as a tooltip; CSS classes, selectors and CSS in strings stay out. Jest/Vitest/node:test
   tests (`*.test.ts`, `__tests__/`) follow the test rules.
-- **Human languages:** English by default; Portuguese built in. Pick them in the project settings
-  (`"languages": ["pt", "en"]`). Synonyms cross languages: "Search" = "Find" = "Buscar" = `search`;
+- **Human languages:** English and Portuguese, both on by default. Narrow them in the project settings
+  (`"languages": ["en"]`). Synonyms cross languages: "Search" = "Find" = "Buscar" = `search`;
   the comment "close the window" matches `window.close()`.
 - **UI:** a file that imports Qt widgets, Tk, wx, Kivy, GPUI, egui, iced or Slint counts as a screen, as
   does JSX/TSX and DOM-building JS; `ui_paths` adds folders. What the user does not see stays out: logs,
@@ -153,22 +156,4 @@ the table yet (add it to `synonyms` in the settings).
 `config.example.json` lists them):
 `languages`, `ui_paths`, `test_paths`, `skip_dirs`, `sensitive_paths`, `synonyms`, `kinds`,
 `tooltip_calls`, `tooltip_second_arg`, `placement_calls`, `limits`, `tooltip_line_chars`,
-`tooltip_lines`, `density`, `descriptive_words`.
-
-## Install
-
-Part of the `tautology` plugin (Claude Code and Google Antigravity): its hooks are registered when the
-plugin is enabled. Needs Python 3.10+ (standard library only); `bin/py.sh` (Unix) and `bin/py.cmd`
-(Windows) find `python3`, `python` or `py -3`, and `TAUTOLOGY_PYTHON` overrides it. Session state lives
-in `.git/tautology/` of the project (never committed).
-
-## Cases and calibration
-
-- `cases/` holds screens, tests and answers that are bad on purpose, plus known false positives;
-  `cases/config.json` is their settings and `cases/expected.txt` the right output.
-- After any change to the rules or hooks: `hunt.py --selftest`. It also runs the hooks in a temporary
-  repository: block a new finding, do not repeat it, let `stop_hook_active` through. `MISSING` is a bad
-  case that escaped; `EXTRA` is a new false positive. Record (`--selftest --record`) only after reading
-  the difference and agreeing with it.
-- `hunt.py --rates --all <files>` shows accepted vs found per rule. A rule with many accepted findings is
-  badly calibrated: adjust its limit or the rule.
+`tooltip_lines`, `density`, `descriptive_words`, `max_emojis`, `design` (`max_card_nesting`, `max_dividers`...).
