@@ -508,11 +508,21 @@ def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
     global _ACCEPTED
     store = store or ACCEPTED_FILE
     base = Path(repo or REPO).resolve()
-    m = FINDING_LINE.match(finding_line.strip().lstrip("- "))
+    raw = finding_line.strip()
+    if raw == "-":
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8")
+        raw = next((line.strip() for line in sys.stdin.read().splitlines() if line.strip()), "")
+    cleaned = re.sub(r"^(?:-\s+|\d+\.\s+)", "", raw)
+    m = FINDING_LINE.match(cleaned)
     if not m or not reason.strip():
-        print(f'Use: --accept "<finding line, as {tool} printed it>" --reason "<why it is not a defect>"')
+        print(f'Use: --accept "<finding line, as {tool} printed it>" (or --accept - via stdin) --reason "<why it is not a defect>"')
         return 2
-    rule, subject = rule_and_subject(m.group("problem"))
+    problem = m.group("problem")
+    if tool == "patterns.py" and problem.startswith(("block of ", "chain ", "local UI helper ")) and '"' not in problem:
+        print("Error: internal double quotes in finding line were stripped by the shell; pipe the line into --accept - via stdin.")
+        return 2
+    rule, subject = rule_and_subject(problem)
     target_path = m.group("path")
     entry = "\t".join([target_path, rule, subject, reason.strip().replace("\t", " "),
                        datetime.date.today().isoformat(), tool])

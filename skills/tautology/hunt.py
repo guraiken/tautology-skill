@@ -363,7 +363,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="the whole file, not only the new lines")
     parser.add_argument("--message", help="file with a text by the agent")
     parser.add_argument("--only", help="comma-separated competencies: " + ", ".join(COMPETENCIES))
-    parser.add_argument("--accept", help="line of a finding that is not a tautology")
+    parser.add_argument("--accept", help="finding line (or '-' to read from stdin) that is not a tautology")
     parser.add_argument("--reason", default="", help="why the accepted finding is not a tautology")
     parser.add_argument("--rates", action="store_true", help="accepted vs found per rule")
     parser.add_argument("--selftest", action="store_true", help="checks the hunt against cases/expected.txt")

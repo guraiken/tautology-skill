@@ -1608,7 +1608,7 @@ def main():
     parser.add_argument("--diff", action="store_true", help="changed UI lines against HEAD")
     parser.add_argument("--all", action="store_true", help="scan the whole file, not only changed lines")
     parser.add_argument("--only", help="comma-separated checks: " + ", ".join(sorted(CHECKS)))
-    parser.add_argument("--accept", help="line of a finding that is not a defect")
+    parser.add_argument("--accept", help="finding line (or '-' to read from stdin) that is not a defect")
     parser.add_argument("--reason", default="", help="why the accepted finding is kept")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
