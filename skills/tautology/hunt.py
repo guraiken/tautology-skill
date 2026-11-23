@@ -379,7 +379,14 @@ def main():
         if not wanted:
             print(f"--only takes: {', '.join(COMPETENCIES)}")
             return 2
-    found = scan(changed_files() if args.diff else args.files, whole=args.all, prune=args.all and not args.diff and not wanted and not args.rates)
+    if args.diff:
+        targets = changed_files()
+        if args.files:
+            scoped = {p.resolve() for p in expand_paths(args.files)}
+            targets = [p for p in targets if p.resolve() in scoped]
+    else:
+        targets = args.files
+    found = scan(targets, whole=args.all, prune=args.all and not args.diff and not wanted and not args.rates)
     if args.rates:
         rates(found)
         return 0
