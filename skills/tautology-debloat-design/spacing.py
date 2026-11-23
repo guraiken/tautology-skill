@@ -101,7 +101,12 @@ def on_scale(value, steps):
     if steps is None:  # no history to learn from: 2 px steps up to 16, then the 4 px grid
         rest = value % FALLBACK_GRID
         return value <= 16 or min(rest, FALLBACK_GRID - rest) <= TOLERANCE
-    return any(abs(value - step) <= TOLERANCE for step in steps)
+    if any(abs(value - step) <= TOLERANCE for step in steps):
+        return True
+    if value > max(steps) * 1.25:  # match nearest(): values above the learned scale snap to the 4 px grid
+        rest = value % FALLBACK_GRID
+        return min(rest, FALLBACK_GRID - rest) <= TOLERANCE
+    return False
 
 
 def nearest(value, steps):
@@ -466,10 +471,16 @@ def _off_scale(rel, where, hits, look, steps, tokens):
         done.add(value)
         step = nearest(value, steps)
         token = f" ({tokens[step]})" if step in tokens else ""
+        above_scale = bool(steps) and value > max(steps) * 1.25
+        target_desc = (
+            f"the nearest {FALLBACK_GRID:g}px grid step above the project scale ({scale})"
+            if above_scale
+            else f"the nearest step of the project scale ({scale})"
+        )
         out.append(core.Finding(
             rel, line, "spacing",
             f"{where}: off-scale spacing {value:g}px",
-            f"snap to {step:g}px{token}, the nearest step of the project scale ({scale})",
+            f"snap to {step:g}px{token}, {target_desc}",
         ))
     return out
 

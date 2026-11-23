@@ -93,6 +93,9 @@ TEXT_STACK_CALL_RE = re.compile(
     r"\.(?:child)\(\s*(?:div\(\)[^;{}]*\.text_size|\"|format!)|<(?:p|span|small|Caption|Text)\b"
 )
 HEADER_NAME_RE = re.compile(r"(?i)header|title|heading|subtitle|intro|banner|card_head")
+FN_DECL_RE = re.compile(
+    r"^\s*(?:(?:pub(?:\([^)]*\))?|export(?:\s+default)?)\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|def|function)\s+"
+)
 
 # Patterns for hardcoded styling literals.
 CSS_FIX = "use CSS custom property or theme token"
@@ -522,30 +525,32 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
                 raw_items["filter_chip_strips"].append((loop_bp, number))
                 loop_filter_chip_seen = True
         else:
-            if DIVIDER_RE.search(raw):
-                raw_items["dividers"].append((eval_bp, number))
-            if BADGE_RE.search(raw):
-                raw_items["badges"].append((eval_bp, number))
-            if ICON_RE.search(raw):
-                raw_items["icons"].append((eval_bp, number))
-            if INFO_HINT_RE.search(raw):
-                raw_items["info_hints"].append((eval_bp, number))
-            if PRIMARY_ACCENT_RE.search(raw):
-                raw_items["primary_accents"].append((eval_bp, number))
-            if FILTER_TRIGGER_RE.search(raw):
-                raw_items["filter_triggers"].append((eval_bp, number))
-                window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
-                wm = FIXED_TRIGGER_WIDTH_RE.search(window_lines)
-                if wm:
-                    width = int(float(wm.group(1) or wm.group(2) or wm.group(3)))
-                    if width >= 140:
-                        fixed_width_triggers.append((number, width))
-            spacer_m = SPACER_RE.search(raw)
-            if spacer_m and float(spacer_m.group("px") or 20) >= 16:
-                spacers.append(number)
-            if CARD_CALL_RE.search(raw):
-                raw_items["cards"].append((eval_bp, number))
-                card_lines.add(number)
+            is_decl = number == start and FN_DECL_RE.match(raw) is not None
+            if not is_decl:
+                if DIVIDER_RE.search(raw):
+                    raw_items["dividers"].append((eval_bp, number))
+                if BADGE_RE.search(raw):
+                    raw_items["badges"].append((eval_bp, number))
+                if ICON_RE.search(raw):
+                    raw_items["icons"].append((eval_bp, number))
+                if INFO_HINT_RE.search(raw):
+                    raw_items["info_hints"].append((eval_bp, number))
+                if PRIMARY_ACCENT_RE.search(raw):
+                    raw_items["primary_accents"].append((eval_bp, number))
+                if FILTER_TRIGGER_RE.search(raw):
+                    raw_items["filter_triggers"].append((eval_bp, number))
+                    window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
+                    wm = FIXED_TRIGGER_WIDTH_RE.search(window_lines)
+                    if wm:
+                        width = int(float(wm.group(1) or wm.group(2) or wm.group(3)))
+                        if width >= 140:
+                            fixed_width_triggers.append((number, width))
+                spacer_m = SPACER_RE.search(raw)
+                if spacer_m and float(spacer_m.group("px") or 20) >= 16:
+                    spacers.append(number)
+                if CARD_CALL_RE.search(raw):
+                    raw_items["cards"].append((eval_bp, number))
+                    card_lines.add(number)
 
         # Track calls to other UI helpers (local or sibling module) with nesting depth & branch path.
         call_depth = len(stack)
@@ -1557,6 +1562,31 @@ def selftest():
         cmp_res = visual_check.compare_images(before_png, after_png)
         if not cmp_res["ok"] or cmp_res["density_delta"] >= 0 or not cmp_res["regions"]:
             problems.append(f"compare_images failed on before->after reduction: {cmp_res!r}")
+
+        # Regression: component factory declaration (`pub fn primary_button`) must not self-count as 2 primary accents
+        kit_rs = web_repo / "src" / "components" / "kit.rs"
+        kit_rs.write_text(
+            "use gpui::prelude::*;\n"
+            "pub fn primary_button(p: Palette) -> Button {\n"
+            "    button().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        kit_out = "\n".join(str(f) for f in scan_file(kit_rs, only=None, tokens=web_tokens, checks={"design"}))
+        if "competing primary accents" in kit_out:
+            problems.append(f"component factory fn primary_button falsely triggered competing primary accents:\n{kit_out}")
+
+        # Regression: spacing.on_scale(spacing.nearest(v, steps), steps) invariant (no 38px->36px->36px loop)
+        sample_steps = (2., 4., 6., 8., 10., 12., 14., 16., 20., 24.)
+        if spacing.on_scale(38., sample_steps) or spacing.nearest(38., sample_steps) != 36.:
+            problems.append("spacing 38px should be off-scale and snap to 36px")
+        if not spacing.on_scale(36., sample_steps):
+            problems.append("spacing 36px (nearest snap for 38px) must be accepted by on_scale")
+        for candidate in range(1, 80):
+            snapped = spacing.nearest(float(candidate), sample_steps)
+            if not spacing.on_scale(snapped, sample_steps):
+                problems.append(f"spacing invariant broken: nearest({candidate})={snapped} is still off-scale")
+                break
     finally:
         core.SELFTEST = False
         shutil.rmtree(web_repo, ignore_errors=True)
