@@ -39,6 +39,16 @@ Evaluate every section across 5 axes:
 1. **Overloaded hierarchy:** cards inside cards, nested borders/fills, too many competing font weights or sizes.
 2. **Unnecessary visual repetition:** stacked title + subtitle + explanatory card saying the same thing, repeated dividers, repeated decorative icons/chips, or inline style chains that belong in a shared component.
 3. **Excessive padding & screen fill:** oversized blank spacers inside gap-spaced containers, heavy nested paddings, redundant explanatory boxes inflating height.
+   **Spacing rhythm (`[spacing]` findings):** spacing must follow one clear, hierarchical scale. The audit learns the scale from the values the repository already uses and flags:
+   - values off that scale (±1 px tolerance, for border compensation);
+   - lopsided padding or margin, with one side 3× the other and 12 px apart;
+   - a label farther from its control than the control is from the next item;
+   - uneven gaps between siblings of the same kind;
+   - three or more different spacer sizes in one stack;
+   - a heading closer to what precedes it than to its own content;
+   - an inner stack spaced looser than the stack that holds it.
+
+   Proximity decides the asymmetric cases. More room above a heading than below it is correct, and so is a label tight to its input. Fix with the container's gap and one larger step between groups, snapped to the scale or a spacing token. Do not insert new spacers.
 4. **Elements without clear purpose:** ornamental pills, labels/captions that restate what the control already shows, noisy secondary notes (remove them, or move genuinely helpful edge-case hints to the project's existing tooltip control — only if the project already uses tooltips).
 5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow — including **stacked/exposed filter rows** (secondary filter/sort dropdowns plus a permanent strip of status pills), **fixed-width filter/sort triggers** eating toolbar space, and **multiple competing solid primary accents** (save solid primary fill for the main CTA; keep selected filters and view toggles on a neutral/surface fill, and fold secondary filters into one `Filters` menu with active-only removable chips).
 
