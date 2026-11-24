@@ -182,7 +182,20 @@ def near_repeats(rel, ui_literals, out, lines=(), whole=False, repeated=()):
                                    "cut the repeat"))
 
 
-def new_ui_texts(path, only=None, keep_accepted=False):
+def screen_ui_texts(source, suffix):
+    """Visible UI prose literals in source as [(line_number, text)]."""
+    lines = jsx_lines(source.splitlines()) if suffix in JSX else source.splitlines()
+    skip = ignored_lines(lines)
+    test_from = rust_test_start(lines) if suffix == ".rs" else None
+    texts = []
+    for number, line in enumerate(lines, 1):
+        if number in skip or (test_from and number >= test_from) or comment_of(line, suffix) is not None:
+            continue
+        texts += [(number, t) for t in literals(line, suffix) if is_prose(t) and on_screen(line, t)]
+    return texts
+
+
+def new_ui_texts(path, only=None, keep_accepted=False, before_source=None, moved_texts=None):
     """New UI texts with their neighbours (6 lines): the agent checks the paraphrase the word
     comparison misses. Returns [(rel, line, text, [(line, neighbour text)])]."""
     rel = relative(path)
@@ -194,17 +207,27 @@ def new_ui_texts(path, only=None, keep_accepted=False):
     source = path.read_text(encoding="utf-8", errors="replace")
     if is_test(rel) or not is_ui(rel, source):
         return []
-    lines = jsx_lines(source.splitlines()) if suffix in JSX else source.splitlines()
-    skip = ignored_lines(lines)
-    test_from = rust_test_start(lines) if suffix == ".rs" else None
-    texts = []
-    for number, line in enumerate(lines, 1):
-        if number in skip or (test_from and number >= test_from) or comment_of(line, suffix) is not None:
-            continue
-        texts += [(number, t) for t in literals(line, suffix) if is_prose(t) and on_screen(line, t)]
+    texts = screen_ui_texts(source, suffix)
+    reused = Counter()
+    if only is not None:
+        if before_source is None:
+            before_source = head_source(path)
+        if before_source:
+            before_counts = Counter(t.strip() for _, t in screen_ui_texts(before_source, suffix))
+            unchanged_counts = Counter(t.strip() for n, t in texts if n not in only)
+            for key, count in before_counts.items():
+                left = count - unchanged_counts.get(key, 0)
+                if left > 0:
+                    reused[key] += left
+        if moved_texts:
+            reused.update(moved_texts)
     items = []
     for number, text in texts:
         if only is None or number in only:
+            key = text.strip()
+            if only is not None and reused.get(key, 0) > 0:
+                reused[key] -= 1
+                continue
             if not keep_accepted and accepted(Finding(rel, number, "copy", f'new UI text "{text}"', "")):
                 continue
             near = [(n, t) for n, t in texts if abs(n - number) <= 6 and (n, t) != (number, text)]

@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -106,11 +107,6 @@ def last_answer(transcript):
         elif kind == "PLANNER_RESPONSE" and isinstance(entry.get("content"), str):
             texts.append(entry["content"])
     return "\n\n".join(t for t in texts if t.strip())
-
-
-def command(*args):
-    """How to run a skill script with this interpreter, for the messages to the agent."""
-    return " ".join(f'"{a}"' if " " in str(a) else str(a) for a in (Path(sys.executable).as_posix(), *args))
 
 
 def _config_flag(repo, key, default=False):
@@ -235,13 +231,35 @@ def stop_report(payload, repo, session, state, files=None, design_mode=False):
     root = repo.resolve()
     include_bloat = design_mode or hunt.C.hook_bloat
     review_ui = design_mode or hunt.C.hook_review_new_ui_texts
+    before_sources = {}
+    removed_by_file = {}
+    if review_ui:
+        multi = len(files) > 1
+        for path in files:
+            snap = gate.snapshot_of(state, session, path)
+            before_src = snap.read_text(encoding="utf-8", errors="replace") if snap.is_file() else hunt.core.head_source(path)
+            before_sources[path] = before_src
+            suffix = path.suffix.lower()
+            if multi and before_src and suffix in {".py", ".rs"} | hunt.core.JS and path.is_file() and path.stat().st_size <= hunt.core.MAX_BYTES:
+                old_c = Counter(t.strip() for _, t in hunt.screen_ui_texts(before_src, suffix))
+                cur_src = path.read_text(encoding="utf-8", errors="replace")
+                new_c = Counter(t.strip() for _, t in hunt.screen_ui_texts(cur_src, suffix))
+                diff = old_c - new_c
+                if diff:
+                    removed_by_file[path] = diff
     for path in files:
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else hunt.added_lines(path)
         if only is None or only:
             findings += hunt.scan_file(path, only, include_bloat=include_bloat)
             if review_ui:
-                review += hunt.new_ui_texts(path, only)
+                sibling_moved = Counter()
+                if removed_by_file:
+                    for other, removed in removed_by_file.items():
+                        if other != path and other.parent == path.parent:
+                            sibling_moved.update(removed)
+                review += hunt.new_ui_texts(path, only, before_source=before_sources.get(path),
+                                            moved_texts=sibling_moved or None)
     if files:
         hunt.core.prune_paths(files, hunt.raw_findings_for, "hunt.py", repo=root)
     if hunt.C.hook_scan_answer:
@@ -277,7 +295,7 @@ def stop_report(payload, repo, session, state, files=None, design_mode=False):
             beside = "; ".join(f'"{t[:40]}"' for _, t in near[:4]) or "none"
             report.append(f'- {rel}:{n} [copy] new UI text "{text}" -> keep if distinct; neighbours: {beside}')
     report.append("Fix what repeats; accept what does not, silently: "
-                  + command((SKILL / "hunt.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"'))
+                  + hunt.core.accept_command(SKILL / "hunt.py"))
     return "\n".join(report)
 
 

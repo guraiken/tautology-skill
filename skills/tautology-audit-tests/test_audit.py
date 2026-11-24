@@ -684,14 +684,13 @@ def stop_report(repo, session, state, gate, only_new_tests=False, files=None):
     with shown.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(k for k in keyed if k not in before) + "\n")
     skill_md = (HERE / "SKILL.md").as_posix()
-    script_py = (HERE / "test_audit.py").as_posix()
     lines = [f"Test audit before delivering (skill tautology-audit-tests, {skill_md}).", "Findings:"]
     lines += [f"- {f}" for f in new[:8]]
     if len(new) > 8:
         lines.append(f"(+{len(new) - 8} more in CLI)")
     lines.append(
         "Fix self-confirming assertions, flaky skips/sleeps, and cloned tests without removing test coverage. "
-        f'False positive? Accept silently: "{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>".'
+        f"False positive? Accept silently: {core.accept_command(HERE / 'test_audit.py', reason='<why>')}."
     )
     return "\n".join(lines)
 

@@ -1374,7 +1374,7 @@ def stop_report(repo, session, state, gate, files=None, lean=False, style_only=F
     lines += core.report_lines(new[:limit])
     if len(new) > limit:
         lines.append(f"(+{len(new) - limit} more in CLI)")
-    accept = f'"{Path(sys.executable).as_posix()}" "{script_py}" --accept "<finding>" --reason "<why>"'
+    accept = core.accept_command(HERE / "design_audit.py", reason="<why>")
     lines.append(f"Not clutter? Accept silently: {accept}." if lean else
                  "Fix overloaded layout hierarchy and replace hardcoded styles with project theme variables/tokens. "
                  f"False positive? Accept silently: {accept}.")

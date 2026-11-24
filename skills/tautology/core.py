@@ -511,6 +511,17 @@ def _cleanup_accepted_store(store, repo):
                 break
 
 
+def accept_command(script, reason="<reason>"):
+    """CLI hint to record a false positive; pipes via stdin (--accept -) on Windows so PowerShell keeps quotes."""
+    exe = Path(sys.executable).as_posix()
+    script_path = Path(script).as_posix()
+    q = lambda s: f'"{s}"' if " " in s else s
+    if sys.platform == "win32":
+        runner = f"& {q(exe)}" if " " in exe else exe
+        return f"'<finding>' | {runner} {q(script_path)} --accept - --reason \"{reason}\""
+    return f'{q(exe)} {q(script_path)} --accept "<finding>" --reason "{reason}"'
+
+
 def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
     """Records a judged false positive; auto-ignores accepted.txt locally via .git/info/exclude."""
     global _ACCEPTED
@@ -524,7 +535,10 @@ def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
     cleaned = re.sub(r"^(?:-\s+|\d+\.\s+)", "", raw)
     m = FINDING_LINE.match(cleaned)
     if not m or not reason.strip():
-        print(f'Use: --accept "<finding line, as {tool} printed it>" (or --accept - via stdin) --reason "<why it is not a defect>"')
+        if sys.platform == "win32":
+            print(f"Use: '<finding line, as {tool} printed it>' | ... --accept - --reason \"<why it is not a defect>\"")
+        else:
+            print(f'Use: --accept "<finding line, as {tool} printed it>" (or --accept - via stdin) --reason "<why it is not a defect>"')
         return 2
     problem = m.group("problem")
     if '"' not in problem and QUOTED_FINDING_RE.search(problem):
@@ -749,6 +763,16 @@ def split_top(args):
 
 
 # -------------------------------------------------------------------------------- files
+def head_source(path):
+    """Contents of a tracked file at HEAD, or None when untracked or outside the repository."""
+    if not path.is_relative_to(REPO):
+        return None
+    rel = path.relative_to(REPO).as_posix()
+    res = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=REPO, capture_output=True,
+                         text=True, encoding="utf-8", errors="replace")
+    return res.stdout if res.returncode == 0 else None
+
+
 def added_lines(path):
     """Numbers of the lines new against HEAD; a file outside git counts whole (None)."""
     if not path.is_relative_to(REPO):

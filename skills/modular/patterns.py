@@ -481,11 +481,6 @@ OPTIONS = [
 ]
 
 
-def command(*args):
-    """How to run a skill script with this interpreter, for the messages to the agent."""
-    return " ".join(f'"{a}"' if " " in str(a) else str(a) for a in (Path(sys.executable).as_posix(), *args))
-
-
 def briefing(found, arch, trigger, created=()):
     """The text the hook returns to the agent: what to extract, where to, and how without changing behaviour."""
     lines = [f"Modularization (skill modular, {(HERE / 'SKILL.md').as_posix()}). Trigger: {trigger}."]
@@ -511,7 +506,7 @@ def briefing(found, arch, trigger, created=()):
             "Extract shared logic (parameterizing only what varies; skip files with unrelated git edits; "
             + (f"verify with {arch.verify}). " if arch.verify else "then build/test). ")
             + "False positive? Accept silently: "
-            + command((HERE / "patterns.py").as_posix(), "--accept", '"<finding>"', "--reason", '"<reason>"') + ".")
+            + core.accept_command(HERE / "patterns.py") + ".")
     return "\n".join(lines)
 
 

@@ -264,9 +264,11 @@ def hook_selftest():
         if code != 2:
             problems.append(f"Stop with a new finding exited {code}, expected 2")
         for needed in ("is wordy", "says the same as", "text with 3 sentences", "return back",  # tautology: example
-                       "New UI texts", "--accept"):  # tautology: example
+                       "New UI texts", "--accept -" if sys.platform == "win32" else "--accept"):  # tautology: example
             if needed not in report:
                 problems.append(f"hook report without {needed!r}")
+        if sys.platform == "win32" and '--accept "<finding>"' in report:
+            problems.append("Windows hook report suggested --accept \"<finding>\" instead of --accept -")
         for forbidden in ("Nunca abrir", "Client key", "Carregando tarefa", "Excluir esta tarefa"):
             if forbidden in report.split("New UI texts")[0]:
                 problems.append(f"false positive in the hook: {forbidden!r}")
@@ -297,10 +299,10 @@ def hook_selftest():
             if bad_acc.returncode == 0:
                 problems.append("hunt.py --accept accepted a quote-stripped finding line")
             for _ in range(2):
-                acc = subprocess.run([sys.executable, str(HERE / "hunt.py"), "--accept", ui_lines[0], "--reason", "valid copy"],
-                                     capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
+                acc = subprocess.run([sys.executable, str(HERE / "hunt.py"), "--accept", "-", "--reason", "valid copy"],
+                                     input=ui_lines[0] + "\n", capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
                 if acc.returncode != 0:
-                    problems.append(f"hunt.py --accept rejected New UI texts line: {acc.stdout}{acc.stderr}")
+                    problems.append(f"hunt.py --accept - rejected New UI texts line: {acc.stdout}{acc.stderr}")
             acc_rows = [l for l in (repo / ".claude" / "tautology" / "accepted.txt").read_text(encoding="utf-8").splitlines()
                         if l and not l.startswith("#")]
             if len(acc_rows) != 1:
@@ -315,6 +317,38 @@ def hook_selftest():
             excl = repo / ".git" / "info" / "exclude"
             if excl.is_file() and "accepted.txt" in excl.read_text(encoding="utf-8"):
                 problems.append("stop_gate did not clean accepted.txt from .git/info/exclude")
+
+        # Refactored existing UI strings that only moved lines/structure must not be flagged as new UI text.
+        modal_rs = repo / "app" / "src" / "telegram_modal.rs"
+        modal_rs.write_text(
+            'use gpui::{div, prelude::*};\n'
+            'fn render() -> impl IntoElement {\n'
+            '    div()\n'
+            '        .child("Buscar no Telegram")\n'
+            '        .child("Ofertas antigas dos seus canais")\n'
+            '        .child("Nenhuma oferta encontrada")\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(modal_rs)})
+        modal_rs.write_text(
+            'use gpui::{div, prelude::*};\n'
+            'fn header() -> impl IntoElement { div().child("Buscar no Telegram") }\n'
+            'fn empty() -> impl IntoElement {\n'
+            '    div()\n'
+            '        .child("Ofertas antigas dos seus canais")\n'
+            '        .child("Nenhuma oferta encontrada")\n'
+            '        .child("Filtro salvo com sucesso")\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        _, refactor_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        for moved in ("Buscar no Telegram", "Ofertas antigas dos seus canais", "Nenhuma oferta encontrada"):
+            if f'new UI text "{moved}"' in refactor_report:
+                problems.append(f"stop_gate flagged moved existing UI text as new: {moved!r}\n{refactor_report}")
+        if 'new UI text "Filtro salvo com sucesso"' not in refactor_report:
+            problems.append(f"stop_gate missed genuinely new UI text after refactor:\n{refactor_report}")
+
         # Status dot with .rounded_full() + .bg() placed before .size(px(8.)) triggers decorative status dot + tic guidance.
         dot_rs = repo / "app" / "src" / "status_bar.rs"
         hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(dot_rs)})
