@@ -114,10 +114,18 @@ class Architecture:
         return any(rel.startswith(p) for p in self.components) or bool(COMPONENT.search(rel))
 
 
+def _own_modular_case(repo, rel):
+    return not core.SELFTEST and (
+        (Path(repo) / rel).resolve().is_relative_to(CASES) or core.own_cases(Path(repo) / rel, rel)
+    )
+
+
 def described_architecture(repo):
     """Documents that describe the architecture: ARCHITECTURE.md in any folder, or a section in AGENTS/CLAUDE/README."""
     found = []
     for rel in tracked(repo):
+        if SKIP & set(Path(rel).parts) or _own_modular_case(repo, rel):
+            continue
         name = Path(rel).name.lower()
         if name in ("architecture.md", "arquitetura.md"):
             found.append(rel)
@@ -144,7 +152,7 @@ def code_files(repo, arch, suffixes=None):
         path = Path(rel)
         if path.suffix not in (suffixes or CODE) or rel.endswith(".d.ts") or SKIP & set(path.parts) or arch.excluded(rel):
             continue
-        if re.search(r"(^|/)\.(?:claude|agents)/skills/[^/]+/cases/", rel) and not core.SELFTEST:
+        if _own_modular_case(repo, rel):
             continue
         if core.is_test(rel):
             continue
@@ -565,8 +573,8 @@ def hook_selftest():
             code, report = hook("stop_gate.py", "Stop")
             if code != 2:
                 problems.append(f"{variant}: Stop exited {code}, expected 2")
-            needed = ["new component", "src/components/visual.rs"] if variant == "with a map" else [
-                "No architecture map"]
+            needed = ["new component", "New component/script started", "src/components/visual.rs"] if variant == "with a map" else [
+                "No architecture map", "New component/script started"]
             problems += [f"{variant}: briefing without {n!r}" for n in needed if n not in report]
             if "flex_1().min_w_0()" in report:
                 problems.append(f"{variant}: framework idiom became a finding")

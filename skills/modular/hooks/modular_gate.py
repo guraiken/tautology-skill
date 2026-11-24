@@ -242,7 +242,7 @@ def stop_report(repo, session, state, gate, files=None):
         entries = [k for k, _ in batch]
         handle.write("\n".join(entries) + "\n")
     trigger = "; ".join(triggers[:3]) + (f" (+{len(triggers) - 3})" if len(triggers) > 3 else "")
-    return patterns.briefing([f for _, f in new], arch, trigger)
+    return patterns.briefing([f for _, f in new], arch, trigger, created=created)
 
 
 if __name__ == "__main__":
