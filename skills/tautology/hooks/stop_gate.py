@@ -197,8 +197,13 @@ def _has_ui_candidate(files):
     return False
 
 
+SKILL_NON_TEST = re.compile(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/test_(?:rules|audit)\.py$")
+
+
 def _has_test_candidate(files):
     for path in files:
+        if SKILL_NON_TEST.search(path.as_posix()):
+            continue
         name = path.name.lower()
         parts = {p.lower() for p in path.parts}
         if ({"tests", "test", "__tests__"} & parts

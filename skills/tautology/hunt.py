@@ -237,6 +237,8 @@ def hook_selftest():
         # without blocking on bloat/New UI texts unless opted in (or in debloat-design mode).
         if scan_message("O trecho deriva do `id` do bloco."):
             problems.append("scan_message false positive on doubled word separated by inline code")
+        if is_test("skills/tautology/test_rules.py") or is_test("skills/tautology-audit-tests/test_audit.py"):
+            problems.append("is_test misclassified skill rule/audit module as a unit test suite")
         code, report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
         if code != 0 or report:
             problems.append(f"default Stop without edited files exited {code}, expected 0")
@@ -289,6 +291,11 @@ def hook_selftest():
         if not ui_lines:
             problems.append(f"New UI texts missing --accept-compatible line:\n{ui_report}")
         else:
+            stripped_ui = ui_lines[0].replace('"', "")
+            bad_acc = subprocess.run([sys.executable, str(HERE / "hunt.py"), "--accept", stripped_ui, "--reason", "stripped test"],
+                                     capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
+            if bad_acc.returncode == 0:
+                problems.append("hunt.py --accept accepted a quote-stripped finding line")
             for _ in range(2):
                 acc = subprocess.run([sys.executable, str(HERE / "hunt.py"), "--accept", ui_lines[0], "--reason", "valid copy"],
                                      capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)

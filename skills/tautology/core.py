@@ -441,6 +441,14 @@ def accepted(finding):
 
 
 FINDING_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+) \[(?P<kind>[^\]]+)\] (?P<problem>.+?)(?: -> .*)?$")
+QUOTED_FINDING_RE = re.compile(
+    r"^(?:block of |chain |local UI helper |pleonasm |doubled word |new UI text |"
+    r"comment restates the code: |title ends with a period: |tooltip of ~|"
+    r"sentence said \d+x: |same idea twice: |passage repeated in different paragraphs: |"
+    r"hardcoded (?:(?:CSS |inline (?:CSS |QSS )?)?color literal|inline (?:CSS |QSS )?color|Tailwind (?:arbitrary color|font-size|radius)) |"
+    r"stock Tailwind color )"
+    r"|(?:\brepeats the text on line \d+|\bsays the same as |\bexplains the obvious: |\bis wordy: |: footnote .+ under the content|\(limit \d+[^)]*\): )"
+)
 
 
 def _git_exclude_file(repo):
@@ -519,7 +527,7 @@ def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
         print(f'Use: --accept "<finding line, as {tool} printed it>" (or --accept - via stdin) --reason "<why it is not a defect>"')
         return 2
     problem = m.group("problem")
-    if tool == "patterns.py" and problem.startswith(("block of ", "chain ", "local UI helper ")) and '"' not in problem:
+    if '"' not in problem and QUOTED_FINDING_RE.search(problem):
         print("Error: internal double quotes in finding line were stripped by the shell; pipe the line into --accept - via stdin.")
         return 2
     rule, subject = rule_and_subject(problem)
@@ -767,7 +775,12 @@ def changed_files():
     return [REPO / n for n in dict.fromkeys(names)]
 
 
+SKILL_NON_TEST = re.compile(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/test_(?:rules|audit)\.py$")
+
+
 def is_test(rel, text=""):
+    if SKILL_NON_TEST.search(rel):
+        return False
     name = Path(rel).name
     return (rel.startswith(("tests/",) + C.test_paths) or "/tests/" in rel or name.startswith("test_")
             or name.endswith(("_test.py", "_tests.rs", "_test.go")) or "/__tests__/" in f"/{rel}"
