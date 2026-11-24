@@ -354,8 +354,8 @@ def report_lines(findings):
 # ----------------------------------------------------------------------------- AI visual tics
 # A tic finding asks for a rebuild, not a deletion: the report adds the screen's own vocabulary and the
 # file is remembered, so the lines that fix it are checked for hardcoded styles.
-TIC_PROBLEM = re.compile(r"carry a helper text|decorative emoji|decorative badges|: footnote \"|tooltip or info icon|"
-                         r"cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards")
+TIC_PROBLEM = re.compile(r"carry a helper text|decorative emoji|decorative badges|decorative status dot|: footnote \"|"
+                         r"tooltip or info icon|cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards")
 TICS = []  # paths with a tic reported in this hook run (hunt and design audit share this module)
 
 

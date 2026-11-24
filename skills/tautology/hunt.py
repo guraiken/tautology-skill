@@ -315,6 +315,47 @@ def hook_selftest():
             excl = repo / ".git" / "info" / "exclude"
             if excl.is_file() and "accepted.txt" in excl.read_text(encoding="utf-8"):
                 problems.append("stop_gate did not clean accepted.txt from .git/info/exclude")
+        # Status dot with .rounded_full() + .bg() placed before .size(px(8.)) triggers decorative status dot + tic guidance.
+        dot_rs = repo / "app" / "src" / "status_bar.rs"
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(dot_rs)})
+        dot_rs.write_text(
+            'use gpui::{div, prelude::*, px};\n'
+            'fn status_bar(p: Palette) -> impl IntoElement {\n'
+            '    div()\n'
+            '        .child(\n'
+            '            div()\n'
+            '                .rounded_full()\n'
+            '                .bg(p.success)\n'
+            '                .size(px(8.)),\n'
+            '        )\n'
+            '        .child(div().text_color(p.success).child("Monitorando"))\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        _, dot_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        if "decorative status dot" not in dot_report or "AI visual tics:" not in dot_report:
+            problems.append(f"stop_gate missed decorative status dot or tic guidance:\n{dot_report}")
+
+        # An svg().size(px(8.)) inside a rounded_full() pill must not inherit the parent div()'s rounded_full/bg.
+        svg_pill_rs = repo / "app" / "src" / "svg_badge.rs"
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(svg_pill_rs)})
+        svg_pill_rs.write_text(
+            'use gpui::{div, prelude::*, px, svg};\n'
+            'fn status_badge(p: Palette) -> impl IntoElement {\n'
+            '    div()\n'
+            '        .rounded_full()\n'
+            '        .bg(p.surface)\n'
+            '        .child(\n'
+            '            svg()\n'
+            '                .size(px(8.))\n'
+            '                .text_color(p.success),\n'
+            '        )\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        _, svg_report = hook("stop_gate.py", "Stop", transcript_path=str(transcript))
+        if "decorative status dot" in svg_report:
+            problems.append(f"status_dots bled parent rounded_full/bg into child svg():\n{svg_report}")
         code, _ = hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(repo / "missing" / "x.rs")})
         if code != 0:
             problems.append(f"PreToolUse on a new file exited {code}, expected 0")

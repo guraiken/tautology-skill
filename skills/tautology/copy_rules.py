@@ -527,6 +527,7 @@ def clutter_checks(rel, lines, suffix, look, skip, test_from, out):
 
     tooltip_everywhere(rel, lines, suffix, look, skip, test_from, out)
     slop_badges(rel, lines, suffix, look, skip, test_from, out)
+    status_dots(rel, lines, suffix, look, skip, test_from, out)
     footnotes(rel, lines, suffix, look, skip, test_from, out)
     if suffix in JSX:
         nested_cards(rel, lines, look, skip, out)
@@ -605,6 +606,67 @@ def slop_badges(rel, lines, suffix, look, skip, test_from, out):
             out.append(Finding(rel, found[0], "design", f"{owner[1]}: {len(found)} decorative badges "
                                f"(lines {', '.join(map(str, found[:5]))})",
                                "keep a badge only for a state the user acts on; no dot, gradient, pulse or hype word"))
+
+
+# Decorative status dot beside status text ("● Online", "● Monitorando") in GPUI builders:
+# TICS.md prefers colouring only the status word with the semantic token.
+# Ignores chart series legends (store_dot/legend), list bullets, checked-item marks, tiny 3-4 px
+# separators and >= 10 px avatars/thumbs/timeline nodes.
+GPUI_DOT_SIZE = re.compile(r"\.(?:size|w)\(px\(([5-9](?:\.\d*)?)\)\)")
+GPUI_DOT_BG = re.compile(r"\.bg\(([^)]+)\)")
+DOT_NON_STATUS = re.compile(
+    r"(?i)(?<![a-z])(?:store_dot|series|legend|plot|chart|bullet|item_row|markdown|timeline|milestone|step|avatar|thumb|badge_dot)(?![a-z])"
+    r"|\.when\(\s*(?:checked|selected|active)\b"
+)
+DOT_STATUS_OWNER = re.compile(r"(?i)(?:status|badge|pill|chip|monitor_bar|banner|state)")
+DOT_STATUS_COLOR = re.compile(r"(?i)\b(?:dot|ink|status\w*|success|danger|warning|accent|focus_ring)\b")
+
+
+def status_dots(rel, lines, suffix, look, skip, test_from, out):
+    if suffix != ".rs":
+        return
+    for number, line in _code_lines(lines, suffix, skip, test_from):
+        if not look(number):
+            continue
+        line_s = line.strip()
+        size_match = GPUI_DOT_SIZE.search(line_s)
+        if not size_match:
+            continue
+        # Isolate the div() chain holding `.size(px(5..9))` without bleeding across a parent `.child(...)`.
+        head = " ".join(l.strip() for l in lines[max(0, number - 6):number - 1])
+        tail = " ".join(l.strip() for l in lines[number - 1:min(len(lines), number + 4)])
+        cut_head = max(head.rfind(".child("), head.rfind(";"))
+        prefix = head[cut_head + 1:] if cut_head >= 0 else head
+        if "div()" in prefix:
+            prefix = prefix[prefix.rfind("div()"):]
+        after_size = tail[size_match.start():]
+        cut = re.search(r"\.child\(|;", after_size)
+        element = (prefix + " " + tail[:size_match.start()] + (after_size[:cut.start()] if cut else after_size)).strip()
+        if "div()" in element:
+            element = element[element.rfind("div()"):]
+        if ".rounded_full()" not in element or ".border_2()" in element:
+            continue
+        bg_match = GPUI_DOT_BG.search(element)
+        if not bg_match:
+            continue
+        if ".w(px(" in element and ".h(px(" not in element:
+            continue
+        owner = render_owner(lines, number)
+        context = "\n".join(lines[max(0, number - 4):min(len(lines), number + 6)])
+        if DOT_NON_STATUS.search(owner[1]) or DOT_NON_STATUS.search(context):
+            continue
+        bg_arg = bg_match.group(1)
+        if not (
+            DOT_STATUS_OWNER.search(owner[1])
+            or DOT_STATUS_COLOR.search(bg_arg)
+            or ".text_color(" in context
+        ):
+            continue
+        out.append(Finding(
+            rel, number, "design",
+            f"{owner[1]}: decorative status dot",
+            "colour only the status word with the semantic token; drop the dot",
+        ))
 
 
 # A note at the foot of a component or page ("Changes are saved automatically.", "Only in the

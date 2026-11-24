@@ -11,6 +11,8 @@ app/src/explicacoes.rs:55 [copy] "Você pode" is wordy: "Você pode tentar de no
 app/src/explicacoes.rs:62 [copy] "Buscar tarefa no calendário" says the same as "Buscar no calendário" (line 61)
 app/src/rodape.rs:15 [design] render: footnote "As alterações são salvas automaticamente." under the content
 app/src/rodape.rs:21 [design] status: footnote "Atualização automática só no app instalado" under the content
+app/src/status.rs:8 [design] monitor_bar: decorative status dot
+app/src/status.rs:18 [design] status_chip: decorative status dot
 app/src/tela.rs:13 [copy] "Clique aqui" explains the obvious: "Clique aqui para abrir as configurações "
 app/src/tela.rs:3 [copy] render: 7 explanatory texts on one screen (limit 5; lines 7, 8, 9, 10, 11, 12)
 app/src/tela.rs:5 [copy] title ends with a period: "Lembretes salvos."
