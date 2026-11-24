@@ -7,6 +7,7 @@ is the rule for asymmetry: a heading or label sits closer to what it introduces 
 precedes it; the inverse, or a control with three times more room on one side, is the defect.
 Covers GPUI chains (Rust), CSS/SCSS blocks, Tailwind classes and Qt layout margins.
 """
+import math
 import re
 from bisect import bisect_right
 from collections import Counter
@@ -112,7 +113,9 @@ def on_scale(value, steps):
 def nearest(value, steps):
     pool = list(steps or ())
     if not pool or value > max(pool) * 1.25:  # past the scale: the grid, not the largest step
-        pool = [FALLBACK_GRID * k for k in range(1, 65)]
+        lower = math.floor(value / FALLBACK_GRID) * FALLBACK_GRID
+        upper = lower + FALLBACK_GRID
+        return max(FALLBACK_GRID, lower if value - lower <= upper - value else upper)
     return min(pool, key=lambda step: (abs(step - value), step))
 
 

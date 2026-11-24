@@ -17,50 +17,62 @@ CELL = 8
 
 def read_png(path):
     """Decodes an 8-bit non-interlaced RGB or RGBA PNG into (width, height, channels, rows)."""
-    data = Path(path).read_bytes()
-    if data[:8] != SIG:
+    src = Path(path)
+    if not src.is_file():
         return None
-    pos, chunks, header = 8, [], None
-    while pos + 8 <= len(data):
-        size, kind = struct.unpack(">I4s", data[pos:pos + 8])
-        body = data[pos + 8:pos + 8 + size]
-        if kind == b"IHDR":
-            header = struct.unpack(">IIBBBBB", body)
-        elif kind == b"IDAT":
-            chunks.append(body)
-        elif kind == b"IEND":
-            break
-        pos += 12 + size
-    if not header:
+    try:
+        data = src.read_bytes()
+        if data[:8] != SIG:
+            return None
+        pos, chunks, header = 8, [], None
+        while pos + 8 <= len(data):
+            size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+            if pos + 8 + size > len(data):
+                return None
+            body = data[pos + 8:pos + 8 + size]
+            if kind == b"IHDR":
+                if len(body) != 13:
+                    return None
+                header = struct.unpack(">IIBBBBB", body)
+            elif kind == b"IDAT":
+                chunks.append(body)
+            elif kind == b"IEND":
+                break
+            pos += 12 + size
+        if not header:
+            return None
+        width, height, depth, color, _, _, interlace = header
+        channels = {2: 3, 6: 4}.get(color)
+        if depth != 8 or channels is None or interlace or width <= 0 or height <= 0:
+            return None
+        raw = zlib.decompress(b"".join(chunks))
+        stride = width * channels
+        if len(raw) < height * (stride + 1):
+            return None
+        rows, previous = [], bytearray(stride)
+        for y in range(height):
+            start = y * (stride + 1)
+            filt = raw[start]
+            line = bytearray(raw[start + 1:start + 1 + stride])
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                up = previous[i]
+                corner = previous[i - channels] if i >= channels else 0
+                if filt == 1:
+                    line[i] = (line[i] + left) & 255
+                elif filt == 2:
+                    line[i] = (line[i] + up) & 255
+                elif filt == 3:
+                    line[i] = (line[i] + ((left + up) >> 1)) & 255
+                elif filt == 4:
+                    p = left + up - corner
+                    pa, pb, pc = abs(p - left), abs(p - up), abs(p - corner)
+                    line[i] = (line[i] + (left if pa <= pb and pa <= pc else up if pb <= pc else corner)) & 255
+            rows.append(bytes(line))
+            previous = line
+        return width, height, channels, rows
+    except (OSError, struct.error, zlib.error, IndexError):
         return None
-    width, height, depth, color, _, _, interlace = header
-    channels = {2: 3, 6: 4}.get(color)
-    if depth != 8 or channels is None or interlace:
-        return None
-    raw = zlib.decompress(b"".join(chunks))
-    stride = width * channels
-    rows, previous = [], bytearray(stride)
-    for y in range(height):
-        start = y * (stride + 1)
-        filt = raw[start]
-        line = bytearray(raw[start + 1:start + 1 + stride])
-        for i in range(stride):
-            left = line[i - channels] if i >= channels else 0
-            up = previous[i]
-            corner = previous[i - channels] if i >= channels else 0
-            if filt == 1:
-                line[i] = (line[i] + left) & 255
-            elif filt == 2:
-                line[i] = (line[i] + up) & 255
-            elif filt == 3:
-                line[i] = (line[i] + ((left + up) >> 1)) & 255
-            elif filt == 4:
-                p = left + up - corner
-                pa, pb, pc = abs(p - left), abs(p - up), abs(p - corner)
-                line[i] = (line[i] + (left if pa <= pb and pa <= pc else up if pb <= pc else corner)) & 255
-        rows.append(bytes(line))
-        previous = line
-    return width, height, channels, rows
 
 
 def write_png(path, width, height, rows, channels=3):
@@ -126,7 +138,7 @@ def _decode_non_png(path):
         fd, tmp_name = tempfile.mkstemp(prefix="debloat-img-", suffix=".png")
         os.close(fd)
         tmp = Path(tmp_name)
-        env = {**os.environ, "DEBLOAT_IMG_SRC": str(src), "DEBLOAT_IMG_DST": str(tmp)}
+        env = {**os.environ, "DEBLOAT_IMG_SRC": str(src.resolve()), "DEBLOAT_IMG_DST": str(tmp)}
         if sys.platform == "win32":
             ps = (
                 "Add-Type -AssemblyName System.Drawing; "
@@ -162,9 +174,7 @@ def read_image(path):
     return _decode_non_png(path)
 
 
-def inspect_image(path):
-    """Verifies that a UI capture image is readable, sized >= 200px, and not blank."""
-    decoded = read_image(path)
+def _inspect_decoded(decoded):
     if decoded is None:
         return {"ok": False, "reason": "unreadable or unsupported image format (expected 8-bit RGB/RGBA PNG or JPEG/BMP/WebP)"}
     width, height, channels, rows = decoded
@@ -174,6 +184,11 @@ def inspect_image(path):
     ok = stats["colors"] >= MIN_COLORS
     reason = "ok" if ok else f"blank or uniform image (only {stats['colors']} sampled colors)"
     return {"ok": ok, "width": width, "height": height, "reason": reason, **stats}
+
+
+def inspect_image(path):
+    """Verifies that a UI capture image is readable, sized >= 200px, and not blank."""
+    return _inspect_decoded(read_image(path))
 
 
 def _likely_offset(w, h, ch_a, rows_a, ch_b, rows_b):
@@ -196,13 +211,15 @@ def _likely_offset(w, h, ch_a, rows_a, ch_b, rows_b):
 
 
 def compare_images(before_path, after_path, tolerance=8, max_regions=12):
-    """Compares before/after PNGs: returns global shift, visual density delta, and changed bounding boxes."""
-    info_a = inspect_image(before_path)
-    info_b = inspect_image(after_path)
+    """Compares before/after images: returns global shift, visual density delta, and changed bounding boxes."""
+    dec_a = read_image(before_path)
+    dec_b = read_image(after_path)
+    info_a = _inspect_decoded(dec_a)
+    info_b = _inspect_decoded(dec_b)
     if not info_a["ok"] or not info_b["ok"]:
         return {"ok": False, "before": info_a, "after": info_b, "regions": []}
-    w1, h1, ch_a, rows_a = read_image(before_path)
-    w2, h2, ch_b, rows_b = read_image(after_path)
+    w1, h1, ch_a, rows_a = dec_a
+    w2, h2, ch_b, rows_b = dec_b
     w, h = min(w1, w2), min(h1, h2)
     dx, dy = _likely_offset(w, h, ch_a, rows_a, ch_b, rows_b) if (w1, h1) == (w2, h2) else (0, 0)
 

@@ -484,7 +484,7 @@ def _blank_literals(line):
     return re.sub(r"\x60[^\x60\n]*\x60", lambda m: "`" + " " * (len(m.group(0)) - 2) + "`", line)
 
 
-def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, bp, number, max_depth, max_depth_line):
+def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, bp, number, max_depth, max_depth_line, is_decl=False):
     """Tracks delimiter/JSX nesting alongside indent so single-line chains and wrappers count accurately."""
     stripped = raw.lstrip()
     c_indent = _container_indent(raw)
@@ -498,7 +498,7 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
 
     box_text = raw if suffix in core.JSX else code
     is_micro = MICRO_RE.search(code) is not None
-    box_matches = [] if is_micro else list(STYLED_BOX_RE.finditer(box_text))
+    box_matches = [] if (is_micro or is_decl) else list(STYLED_BOX_RE.finditer(box_text))
     tokens = []  # (pos, kind, match_obj)
     for m in box_matches:
         tokens.append((m.start(), "box", m))
@@ -657,6 +657,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
         else:
             eval_bp = line_bp
 
+        is_decl = number == start and FN_DECL_RE.match(raw) is not None
         if ".gap(" in raw or re.search(r"\bgap-\d+", raw):
             gap_calls += 1
         if in_loop:
@@ -666,33 +667,31 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
             if not loop_filter_chip_seen and FILTER_CHIP_RE.search(raw):
                 raw_items["filter_chip_strips"].append((loop_bp, number))
                 loop_filter_chip_seen = True
-        else:
-            is_decl = number == start and FN_DECL_RE.match(raw) is not None
-            if not is_decl:
-                if DIVIDER_RE.search(raw):
-                    raw_items["dividers"].append((eval_bp, number))
-                if BADGE_RE.search(raw):
-                    raw_items["badges"].append((eval_bp, number))
-                if ICON_RE.search(raw):
-                    raw_items["icons"].append((eval_bp, number))
-                if INFO_HINT_RE.search(raw):
-                    raw_items["info_hints"].append((eval_bp, number))
-                if PRIMARY_ACCENT_RE.search(raw):
-                    raw_items["primary_accents"].append((eval_bp, number))
-                if FILTER_TRIGGER_RE.search(raw):
-                    raw_items["filter_triggers"].append((eval_bp, number))
-                    window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
-                    wm = FIXED_TRIGGER_WIDTH_RE.search(window_lines)
-                    if wm:
-                        width = int(float(wm.group(1) or wm.group(2) or wm.group(3)))
-                        if width >= 140:
-                            fixed_width_triggers.append((number, width))
-                spacer_m = SPACER_RE.search(raw)
-                if spacer_m and float(spacer_m.group("px") or 20) >= 16:
-                    spacers.append(number)
-                if CARD_CALL_RE.search(raw):
-                    raw_items["cards"].append((eval_bp, number))
-                    card_lines.add(number)
+        elif not is_decl:
+            if DIVIDER_RE.search(raw):
+                raw_items["dividers"].append((eval_bp, number))
+            if BADGE_RE.search(raw):
+                raw_items["badges"].append((eval_bp, number))
+            if ICON_RE.search(raw):
+                raw_items["icons"].append((eval_bp, number))
+            if INFO_HINT_RE.search(raw):
+                raw_items["info_hints"].append((eval_bp, number))
+            if PRIMARY_ACCENT_RE.search(raw):
+                raw_items["primary_accents"].append((eval_bp, number))
+            if FILTER_TRIGGER_RE.search(raw):
+                raw_items["filter_triggers"].append((eval_bp, number))
+                window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
+                wm = FIXED_TRIGGER_WIDTH_RE.search(window_lines)
+                if wm:
+                    width = int(float(wm.group(1) or wm.group(2) or wm.group(3)))
+                    if width >= 140:
+                        fixed_width_triggers.append((number, width))
+            spacer_m = SPACER_RE.search(raw)
+            if spacer_m and float(spacer_m.group("px") or 20) >= 16:
+                spacers.append(number)
+            if CARD_CALL_RE.search(raw):
+                raw_items["cards"].append((eval_bp, number))
+                card_lines.add(number)
 
         # Track calls to other UI helpers (local or sibling module) with nesting depth & branch path.
         call_depth = len(stack)
@@ -712,7 +711,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
 
         max_depth, max_depth_line = _track_line_boxes(
             raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, eval_bp,
-            number, max_depth, max_depth_line,
+            number, max_depth, max_depth_line, is_decl=is_decl,
         )
 
         if opened_branch:
@@ -1708,19 +1707,42 @@ def selftest():
         cmp_res = visual_check.compare_images(before_png, after_png)
         if not cmp_res["ok"] or cmp_res["density_delta"] >= 0 or not cmp_res["regions"]:
             problems.append(f"compare_images failed on before->after reduction: {cmp_res!r}")
+        if visual_check.inspect_image(web_repo / "missing.png")["ok"]:
+            problems.append("inspect_image accepted a nonexistent file")
+        corrupt_png = web_repo / "corrupt.png"
+        corrupt_png.write_bytes(visual_check.SIG + b"\x00\x00\x00\x0dIHDRbad")
+        if visual_check.inspect_image(corrupt_png)["ok"]:
+            problems.append("inspect_image accepted a corrupt PNG")
+        import struct
+        bmp_path = web_repo / "before.bmp"
+        bmp_body = b"".join(
+            bytes(b for i in range(0, len(row), 3) for b in (row[i + 2], row[i + 1], row[i]))
+            for row in reversed(before_rows)
+        )
+        bmp_hdr = b"BM" + struct.pack("<IHHI", 54 + len(bmp_body), 0, 0, 54)
+        bmp_dib = struct.pack("<IIIHHIIIIII", 40, pw, ph, 1, 24, 0, len(bmp_body), 2835, 2835, 0, 0)
+        bmp_path.write_bytes(bmp_hdr + bmp_dib + bmp_body)
+        bmp_info = visual_check.inspect_image(bmp_path)
+        if not bmp_info["ok"] or bmp_info["width"] != pw or bmp_info["height"] != ph:
+            problems.append(f"inspect_image failed on non-PNG BMP capture: {bmp_info!r}")
 
-        # Regression: component factory declaration (`pub fn primary_button`) must not self-count as 2 primary accents
+        # Regression: component factory declarations (`pub fn primary_button`, `pub fn solid_card`) must not self-count
         kit_rs = web_repo / "src" / "components" / "kit.rs"
         kit_rs.write_text(
             "use gpui::prelude::*;\n"
             "pub fn primary_button(p: Palette) -> Button {\n"
             "    button().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n"
+            "pub fn solid_card(p: Palette) -> impl IntoElement {\n"
+            "    div().bg(p.bg)\n"
+            "        .child(div().bg(p.surface)\n"
+            "            .child(div().border_1().child(\"ok\")))\n"
             "}\n",
             encoding="utf-8",
         )
         kit_out = "\n".join(str(f) for f in scan_file(kit_rs, only=None, tokens=web_tokens, checks={"design"}))
-        if "competing primary accents" in kit_out:
-            problems.append(f"component factory fn primary_button falsely triggered competing primary accents:\n{kit_out}")
+        if "competing primary accents" in kit_out or "overloaded hierarchy" in kit_out:
+            problems.append(f"component factory declaration falsely triggered design finding:\n{kit_out}")
 
         # Regression: *_layer / *_drawer / *_sheet overlays, complementary single-subject if branches
         # (is_some/else vs if let Some, eq variants), and early-return local vs callee unification
@@ -1821,13 +1843,15 @@ def selftest():
             if fn_expected not in same_pol_out:
                 problems.append(f"same_polarity_dirty.rs missed expected finding {fn_expected!r}:\n{same_pol_out}")
 
-        # Regression: spacing.on_scale(spacing.nearest(v, steps), steps) invariant (no 38px->36px->36px loop)
+        # Regression: spacing.on_scale(spacing.nearest(v, steps), steps) invariant (no 38px->36px->36px loop, >256px)
         sample_steps = (2., 4., 6., 8., 10., 12., 14., 16., 20., 24.)
         if spacing.on_scale(38., sample_steps) or spacing.nearest(38., sample_steps) != 36.:
             problems.append("spacing 38px should be off-scale and snap to 36px")
+        if spacing.nearest(302., sample_steps) != 300.:
+            problems.append(f"spacing 302px should snap to 300px, got {spacing.nearest(302., sample_steps)}")
         if not spacing.on_scale(36., sample_steps):
             problems.append("spacing 36px (nearest snap for 38px) must be accepted by on_scale")
-        for candidate in range(1, 80):
+        for candidate in range(1, 320):
             snapped = spacing.nearest(float(candidate), sample_steps)
             if not spacing.on_scale(snapped, sample_steps):
                 problems.append(f"spacing invariant broken: nearest({candidate})={snapped} is still off-scale")
