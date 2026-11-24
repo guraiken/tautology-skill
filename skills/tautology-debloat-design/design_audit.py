@@ -51,9 +51,17 @@ STYLED_BOX_RE = re.compile(
     r"|<(?:div|section|aside|article)\b[^>]*(?:bg-|shadow|card|rounded|\bborder(?!-0\b))"
 )
 CARD_CALL_RE = re.compile(
-    r"\b(?:solid_card|surface_card|form_card|modal_card)\s*\(|"
-    r"<(?:Card|Paper|Panel)\b|\.rounded\([^)]*\)\s*\.bg\("
+    r"\b(?:solid_card|surface_card|form_card|modal_card)\s*\("
+    r"|\b(?:visual|kit|ui|theme)::card\s*\("
+    r"|<(?:Card|Paper|Panel)\b|\.rounded\([^)]*\)\s*\.bg\("
 )
+INNER_CARD_CALL_RE = re.compile(
+    r"\b(?:solid_card|surface_card|form_card)\s*\(|\b(?:visual|kit|ui|theme)::card\s*\("
+)
+MODAL_BOX_RE = re.compile(
+    r"\b(?:modal_card|modal_shell|modal_backdrop|(?:visual|kit|ui)::(?:modal|dialog))\s*\(|<(?:Modal|Dialog)\b"
+)
+HEADLINE_RE = re.compile(r"\b(?:visual|typography|theme)::HEADLINE\b|<h1\b")
 MICRO_RE = re.compile(
     r"\b(?:button|reveal_button|secondary_button|primary_button|close_button|icon|tag|badge|chip|switch|check_box)\s*\("
     r"|\bsize\(px\((?:[1-9]|1[0-9]|2[0-9]|3[0-6])\.?\)"
@@ -66,13 +74,17 @@ ICON_RE = re.compile(r"\b(?:visual::icon|icon)\s*\(|<(?:[A-Z]\w*Icon|Icon)\b")
 INFO_HINT_RE = re.compile(r"\binfo_hint\s*\(|<(?:InfoHint|HelpTip|HintIcon)\b")
 PRIMARY_ACCENT_RE = re.compile(
     r"\bprimary_button\s*\("
-    r"|\.bg\(\s*\w+\.primary\s*\)"
+    r"|\.bg\(\s*(?!Rgba\s*\{)[^;\n]*\b\w+\.primary\b"
     r"|\.pill\([^;\n]*,\s*\w+\.primary\b"
     r"|\bvariant\s*=\s*[\"']primary[\"']"
     r"|\bbg-primary\b(?!/)"
     r"|<PrimaryButton\b"
     r"|\.setProperty\(\s*[\"']primary[\"']\s*,\s*True\s*\)"
 )
+PRIMARY_FILL_BODY_RE = re.compile(PRIMARY_ACCENT_RE.pattern + r"|\b\w+\.on_primary\s*\(")
+KIT_HELPER_FILE_RE = re.compile(r"(?i)(?:^|/)(?:kit|visual|components|widgets|controls|theme)(?:/|\.)")
+QUALIFIED_SEGMENTED_RE = re.compile(r"\b(?:kit|visual|ui)::(segmented\w*)\s*\(")
+PRIMARY_ARG_CALL_RE = re.compile(r"(?:\.pill|\bsegmented\w*)\s*\(")
 FILTER_TRIGGER_RE = re.compile(
     r"\b(?:menu_trigger|menu_trigger_with_state)\s*\("
     r"|<(?:Select|select|Dropdown|FilterSelect|SortSelect)\b"
@@ -172,17 +184,72 @@ def repo_ui_files(root=None):
     return out
 
 
+VARIANT_PARAM_RE = re.compile(r"\b(?:is_)?(?:primary|active|selected|highlighted)\s*:\s*bool\b|\bvariant\s*:")
+
+
+def _scan_kit_primary_helpers(source, primary_helpers, non_primary_helpers):
+    """Detects exported Rust UI kit helpers whose implementation unconditionally paints a solid p.primary fill."""
+    lines = source.splitlines()
+    test_from = core.rust_test_start(lines)
+    spans = _function_spans(lines, ".rs", test_from)
+    bodies, pub_names, direct = {}, set(), set()
+    for start, name, end in spans:
+        if re.match(r"^(?:render|build|view|main$|new$)", name):
+            continue
+        decl = lines[start - 1]
+        if re.match(r"^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?fn\b", decl):
+            pub_names.add(name)
+        sig = " ".join(lines[start - 1:min(end, start + 3)])
+        body = "\n".join(lines[start:end])
+        bodies[name] = body
+        is_variant_toggle = bool(VARIANT_PARAM_RE.search(sig)) and bool(
+            re.search(r"\b\w+\.(?:surface|selected|card|bg|muted)\b", body)
+        )
+        if not is_variant_toggle and PRIMARY_FILL_BODY_RE.search(body):
+            direct.add(name)
+    propagated = set(direct)
+    if direct:
+        call_re = re.compile(r"(?<![.\w])(" + "|".join(re.escape(n) for n in direct) + r")\s*\(")
+        for name, body in bodies.items():
+            if name not in propagated and call_re.search(body):
+                propagated.add(name)
+    for name in pub_names:
+        if name in propagated:
+            primary_helpers.add(name)
+            non_primary_helpers.discard(name)
+        elif name not in primary_helpers:
+            non_primary_helpers.add(name)
+
+
+def _discover_kit_helpers(root=None):
+    """Lightweight pass over Rust kit/component files so lean hooks match CLI primary-helper detection."""
+    primary_helpers, non_primary_helpers = set(), set()
+    for rel, path, suffix in _tracked_candidates(root, exts={".rs"}):
+        if KIT_HELPER_FILE_RE.search(rel):
+            _scan_kit_primary_helpers(
+                path.read_text(encoding="utf-8", errors="replace"),
+                primary_helpers,
+                non_primary_helpers,
+            )
+    return primary_helpers, non_primary_helpers
+
+
 def discover_project_tokens(root=None):
-    """Detects palette, typography, radius tokens, and tooltips; prioritizes theme/style files first."""
+    """Detects palette, typography, radius tokens, tooltips, and kit primary-fill helpers."""
     tokens = {
         "has_palette": bool(core.C.design.get("style_tokens")),
         "has_font_tokens": bool(core.C.design.get("style_tokens")),
         "has_radius_tokens": False,
         "uses_tooltips": bool(core.C.raw.get("tooltip_calls")),
+        "primary_helpers": set(),
+        "non_primary_helpers": set(),
     }
     candidates = list(_tracked_candidates(root))
     theme_first = [c for c in candidates if is_theme_file(c[0]) or c[2] in STYLE_EXT or "tailwind.config" in Path(c[0]).name.lower()]
-    general = [c for c in candidates if c not in set(theme_first)]
+    kit_rs = [c for c in candidates if c[2] == ".rs" and KIT_HELPER_FILE_RE.search(c[0])]
+    prioritized = list(dict.fromkeys(theme_first + kit_rs))
+    prioritized_set = set(prioritized)
+    general = [c for c in candidates if c not in prioritized_set]
 
     def inspect(rel, suffix, source):
         is_theme = is_theme_file(rel) or suffix in STYLE_EXT or "tailwind.config" in Path(rel).name.lower()
@@ -196,8 +263,10 @@ def discover_project_tokens(root=None):
             tokens["has_radius_tokens"] = True
         if core.C.tooltip_call.search(source) or re.search(r"<Tooltip\b|data-tooltip|\btitle=", source):
             tokens["uses_tooltips"] = True
+        if suffix == ".rs" and KIT_HELPER_FILE_RE.search(rel):
+            _scan_kit_primary_helpers(source, tokens["primary_helpers"], tokens["non_primary_helpers"])
 
-    for rel, path, suffix in theme_first:
+    for rel, path, suffix in prioritized:
         inspect(rel, suffix, path.read_text(encoding="utf-8", errors="replace"))
     checked = 0
     for rel, path, suffix in general:
@@ -206,7 +275,7 @@ def discover_project_tokens(root=None):
             continue
         inspect(rel, suffix, source)
         checked += 1
-        if checked >= 50 and all(tokens.values()):
+        if checked >= 50 and all(tokens[k] for k in ("has_palette", "has_font_tokens", "has_radius_tokens", "uses_tooltips")):
             break
     return tokens
 
@@ -334,6 +403,46 @@ def _aggregate_branches(entries, widths=1):
         else:
             base += max(arm_totals, default=0)
     return base
+
+
+def _aggregate_branches_touched(entries, widths):
+    """Combines (counts, touched_max, has_touched) across mutually exclusive branches so an edited clean
+    branch cannot trigger a pre-existing finding from an untouched sibling branch."""
+    base_all = [0] * widths
+    base_t = [0] * widths
+    base_has = [False] * widths
+    by_group = defaultdict(lambda: defaultdict(list))
+    for path, counts, t_max, has_t in entries:
+        if not path:
+            for i in range(widths):
+                prev_all, prev_t, prev_has = base_all[i], base_t[i], base_has[i]
+                base_all[i] = prev_all + counts[i]
+                if prev_has and has_t[i]:
+                    base_t[i] = prev_t + t_max[i]
+                    base_has[i] = True
+                elif prev_has:
+                    base_t[i] = prev_t + counts[i]
+                    base_has[i] = True
+                elif has_t[i]:
+                    base_t[i] = prev_all + t_max[i]
+                    base_has[i] = True
+        else:
+            gid, arm = path[0]
+            by_group[gid][arm].append((path[1:], counts, t_max, has_t))
+    for arms in by_group.values():
+        arm_res = [_aggregate_branches_touched(arm_entries, widths) for arm_entries in arms.values()]
+        for i in range(widths):
+            grp_all = max((a[i] for a, _, _ in arm_res), default=0)
+            grp_has = any(h[i] for _, _, h in arm_res)
+            grp_t = max((t[i] for _, t, h in arm_res if h[i]), default=0)
+            prev_all, prev_t, prev_has = base_all[i], base_t[i], base_has[i]
+            base_all[i] = prev_all + grp_all
+            if prev_has:
+                base_t[i] = prev_t + grp_all
+            elif grp_has:
+                base_t[i] = prev_all + grp_t
+                base_has[i] = True
+    return base_all, base_t, base_has
 
 
 _BRANCH_KEYWORDS = {"let", "true", "false", "True", "False", "None", "null", "undefined"}
@@ -484,7 +593,7 @@ def _blank_literals(line):
     return re.sub(r"\x60[^\x60\n]*\x60", lambda m: "`" + " " * (len(m.group(0)) - 2) + "`", line)
 
 
-def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, bp, number, max_depth, max_depth_line, is_decl=False):
+def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, bp, number, max_depth, max_depth_line, is_decl=False, box_lines=None):
     """Tracks delimiter/JSX nesting alongside indent so single-line chains and wrappers count accurately."""
     stripped = raw.lstrip()
     c_indent = _container_indent(raw)
@@ -531,6 +640,8 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
             while stack and (cur_n < stack[-1][0][0] or (stack[-1][4] and cur_n <= stack[-1][0][0])):
                 stack.pop()
         elif kind == "box":
+            if box_lines is not None:
+                box_lines.add(number)
             cur_n = delim_state[0] + delim_state[1]
             box_key = (cur_n, c_indent)
             is_jsx = m.group(0).startswith("<")
@@ -553,7 +664,28 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
     return max_depth, max_depth_line
 
 
-def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
+def _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_primary_helpers):
+    """Detects solid p.primary fills: direct primary_button/.bg/.pill, discovered kit helpers, or kit::segmented."""
+    if PRIMARY_ACCENT_RE.search(raw):
+        return True
+    for m in PRIMARY_ARG_CALL_RE.finditer(code):
+        span, _ = copy_rules.call_span(lines, number, m.end(), limit=12)
+        if re.search(r"(?<!\.\.)\b\w+\.primary\b", span):
+            return True
+    if primary_helpers:
+        for m in re.finditer(r"(?<![.\w])(?:(?:kit|visual|ui)::)?([a-z_]\w*)\s*\(", code):
+            if m.group(1) in primary_helpers:
+                return True
+    for m in QUALIFIED_SEGMENTED_RE.finditer(code):
+        fn_name = m.group(1)
+        if fn_name not in non_primary_helpers:
+            span, _ = copy_rules.call_span(lines, number, m.end(), limit=12)
+            if not re.search(r"\b\w+\.(?:selected|surface|muted|card|bg)\b", span):
+                return True
+    return False
+
+
+def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, primary_helpers=(), non_primary_helpers=()):
     cfg = core.C.design
     stack = []  # [[(nesting, indent), line_number, flags, card_counted, is_jsx]]
     branch_stack = []  # [[indent, group_id, arm_idx, kind, has_else, has_return, cond_meta]]
@@ -572,6 +704,8 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
     loop_primary_seen = False
     loop_filter_chip_seen = False
     card_lines = set()
+    box_lines = set()
+    has_modal_box = False
 
     for number in range(start, end + 1):
         if number in skip:
@@ -661,13 +795,15 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
         if ".gap(" in raw or re.search(r"\bgap-\d+", raw):
             gap_calls += 1
         if in_loop:
-            if not loop_primary_seen and PRIMARY_ACCENT_RE.search(raw):
+            if not loop_primary_seen and _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_primary_helpers):
                 raw_items["primary_accents"].append((loop_bp, number))
                 loop_primary_seen = True
             if not loop_filter_chip_seen and FILTER_CHIP_RE.search(raw):
                 raw_items["filter_chip_strips"].append((loop_bp, number))
                 loop_filter_chip_seen = True
         elif not is_decl:
+            if MODAL_BOX_RE.search(raw):
+                has_modal_box = True
             if DIVIDER_RE.search(raw):
                 raw_items["dividers"].append((eval_bp, number))
             if BADGE_RE.search(raw):
@@ -676,8 +812,10 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
                 raw_items["icons"].append((eval_bp, number))
             if INFO_HINT_RE.search(raw):
                 raw_items["info_hints"].append((eval_bp, number))
-            if PRIMARY_ACCENT_RE.search(raw):
+            if _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_primary_helpers):
                 raw_items["primary_accents"].append((eval_bp, number))
+            if HEADLINE_RE.search(raw):
+                raw_items["headlines"].append((eval_bp, number))
             if FILTER_TRIGGER_RE.search(raw):
                 raw_items["filter_triggers"].append((eval_bp, number))
                 window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
@@ -689,6 +827,8 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
             spacer_m = SPACER_RE.search(raw)
             if spacer_m and float(spacer_m.group("px") or 20) >= 16:
                 spacers.append(number)
+            if INNER_CARD_CALL_RE.search(raw):
+                raw_items["inner_cards"].append((eval_bp, number))
             if CARD_CALL_RE.search(raw):
                 raw_items["cards"].append((eval_bp, number))
                 card_lines.add(number)
@@ -711,7 +851,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
 
         max_depth, max_depth_line = _track_line_boxes(
             raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, eval_bp,
-            number, max_depth, max_depth_line, is_decl=is_decl,
+            number, max_depth, max_depth_line, is_decl=is_decl, box_lines=box_lines,
         )
 
         if opened_branch:
@@ -732,23 +872,31 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
 
     clean_bp = lambda bp: tuple(pair for pair in bp if pair[0] in confirmed)
     count_keys = (
-        "cards", "dividers", "badges", "icons", "info_hints",
-        "primary_accents", "filter_triggers", "filter_chip_strips",
+        "cards", "inner_cards", "dividers", "badges", "icons", "info_hints",
+        "primary_accents", "headlines", "filter_triggers", "filter_chip_strips",
     )
     items = {k: [n for _, n in raw_items[k]] for k in count_keys}
     counts = {k: _aggregate_branches([(clean_bp(bp), 1) for bp, _ in raw_items[k]]) for k in count_keys}
+    touched_counts = {k: any(look(n) for n in items[k]) for k in count_keys}
     local_entries = []
     for idx, k in enumerate(count_keys):
-        for bp, _ in raw_items[k]:
+        for bp, ln in raw_items[k]:
             vec = [0] * len(count_keys)
             vec[idx] = 1
-            local_entries.append((clean_bp(bp), vec))
-    calls = [(qual, target, d, ln, clean_bp(bp), nh) for qual, target, d, ln, bp, nh in raw_calls]
+            hit = look(ln)
+            t_vec = list(vec) if hit else [0] * len(count_keys)
+            h_vec = [False] * len(count_keys)
+            h_vec[idx] = hit
+            local_entries.append((clean_bp(bp), vec, t_vec, h_vec))
+    calls = [(qual, target, d, look(ln), clean_bp(bp), nh) for qual, target, d, ln, bp, nh in raw_calls]
 
     return {
         "start": start, "end": end, "name": name,
         "max_depth": max_depth, "max_depth_line": max_depth_line,
-        **items, "counts": counts, "local_entries": local_entries, "spacers": spacers,
+        "touched_depth": any(look(n) for n in box_lines),
+        "has_modal_box": has_modal_box,
+        **items, "counts": counts, "touched_counts": touched_counts,
+        "local_entries": local_entries, "spacers": spacers,
         "fixed_width_triggers": fixed_width_triggers,
         "gap_calls": gap_calls, "header_runs": header_runs,
         "inline_chains": inline_chains, "calls": calls,
@@ -756,12 +904,12 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees):
     }
 
 
-def _emit_fn_findings(rel, stats, uses_tooltips, look, out):
+def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False):
     cfg = core.C.design
     name = stats["name"]
     if not stats["touched"]:
         return
-    if stats["max_depth"] > cfg["max_container_depth"]:
+    if stats["max_depth"] > cfg["max_container_depth"] and stats["touched_depth"]:
         out.append(core.Finding(
             rel, stats["max_depth_line"], "design",
             f"{name}: overloaded hierarchy with {stats['max_depth']} nested styled boxes (limit {cfg['max_container_depth']})",
@@ -780,6 +928,8 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out):
          "make labels self-explanatory and keep help icons only for non-obvious behavior"),
         ("primary_accents", "max_primary_accents", "competing primary accents in one view",
          "keep solid primary accent for the main CTA only; use neutral/surface fill for selected filters and toggles"),
+        ("headlines", "max_headlines", "competing HEADLINE headings in one view",
+         "keep one primary headline for the view/modal and step down inner section titles"),
         ("filter_triggers", "max_exposed_filters", "exposed filter/sort dropdowns in one view",
          "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set"),
     ]
@@ -789,6 +939,21 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out):
         limit = cfg[limit_key]
         if eff > limit and any(look(n) for n in items):
             out.append(core.Finding(rel, items[0], "design", f"{name}: {eff} {desc} (limit {limit})", fix))
+    fn_is_modal = is_modal_file or bool(MODAL_CALLEE_RE.search(name)) or stats["has_modal_box"]
+    if fn_is_modal:
+        inner_hit = stats["counts"]["inner_cards"] >= 1 and any(look(n) for n in stats["inner_cards"])
+        nested_modal_cards = (
+            stats["counts"]["cards"] >= 2
+            and (stats["has_modal_box"] or stats["max_depth"] >= 2)
+            and any(look(n) for n in stats["cards"])
+        )
+        if inner_hit or nested_modal_cards:
+            line_no = stats["inner_cards"][0] if inner_hit else stats["cards"][-1]
+            out.append(core.Finding(
+                rel, line_no, "design",
+                f"{name}: inner boxed card inside a modal (nested surface)",
+                "flatten the inner card using whitespace and typography; the modal itself is already a card",
+            ))
     if stats["counts"]["filter_triggers"] >= 1 and stats["counts"]["filter_chip_strips"] >= 1:
         hit_lines = stats["filter_triggers"] + stats["filter_chip_strips"]
         if any(look(n) for n in hit_lines):
@@ -918,7 +1083,7 @@ def _resolve_callee(cur_rel, cur_meta, qual, target, metas_by_rel):
     return None
 
 
-def _analyze_unit(rel, path, lines, source, suffix, test_from, look, skip, peer_metas=None):
+def _analyze_unit(rel, path, lines, source, suffix, test_from, look, skip, peer_metas=None, primary_helpers=(), non_primary_helpers=()):
     """Parses spans and analyses every function in one UI file."""
     spans = _function_spans(lines, suffix, test_from)
     local_names = {name for _, name, _ in spans}
@@ -928,13 +1093,19 @@ def _analyze_unit(rel, path, lines, source, suffix, test_from, look, skip, peer_
             known_callees |= set(meta["fn_names"])
     by_name = {}
     for start, name, end in spans:
-        by_name[name] = _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees)
+        by_name[name] = _analyze_fn(
+            lines, suffix, start, name, end, look, skip, known_callees,
+            primary_helpers=primary_helpers, non_primary_helpers=non_primary_helpers,
+        )
     impls, imports = _file_symbols(source)
     return {"rel": rel, "path": path, "by_name": by_name, "fn_names": local_names, "impls": impls, "imports": imports}
 
 
-def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, uses_tooltips, out, cache=None):
+def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens, out, cache=None):
     cfg = core.C.design
+    uses_tooltips = tokens.get("uses_tooltips", False)
+    primary_helpers = tokens.get("primary_helpers", ())
+    non_primary_helpers = tokens.get("non_primary_helpers", ())
     store = {} if cache is None else cache
     metas = store.setdefault("units", {})
     file_cache = store.setdefault("files", {})
@@ -951,6 +1122,7 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
             unit = _analyze_unit(
                 prel, ppath, plines, psource, psuf, ptest, lambda n: False, pskip,
                 peer_metas={"_": {"fn_names": all_fn_names}},
+                primary_helpers=primary_helpers, non_primary_helpers=non_primary_helpers,
             )
             unit["known_callees"] = set(all_fn_names)
             metas[pkey] = unit
@@ -959,10 +1131,19 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
     cur_meta = _analyze_unit(
         rel, path, lines, source, suffix, test_from, look, skip,
         peer_metas={"_": {"fn_names": all_fn_names}},
+        primary_helpers=primary_helpers, non_primary_helpers=non_primary_helpers,
+    )
+    is_modal_file = (
+        bool(MODAL_CALLEE_RE.search(rel))
+        or any(MODAL_CALLEE_RE.search(imp) for imp in cur_meta["impls"])
     )
     metas_by_rel = {rel: cur_meta, **peer_metas}
+    local_modal_card_fns = set()
     for stats in cur_meta["by_name"].values():
-        _emit_fn_findings(rel, stats, uses_tooltips, look, out)
+        before_len = len(out)
+        _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=is_modal_file)
+        if any("inner boxed card inside a modal" in f.problem for f in out[before_len:]):
+            local_modal_card_fns.add(stats["name"])
 
     called_anywhere = set()
     for m_rel, m_data in metas_by_rel.items():
@@ -973,11 +1154,14 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
                     called_anywhere.add(resolved)
 
     count_keys = (
-        "cards", "dividers", "badges", "icons", "info_hints",
-        "primary_accents", "filter_triggers", "filter_chip_strips",
+        "cards", "inner_cards", "dividers", "badges", "icons", "info_hints",
+        "primary_accents", "headlines", "filter_triggers", "filter_chip_strips",
     )
+    cards_idx = count_keys.index("cards")
+    inner_card_idx = count_keys.index("inner_cards")
     hint_idx = count_keys.index("info_hints")
     primary_idx = count_keys.index("primary_accents")
+    headline_idx = count_keys.index("headlines")
     trigger_idx = count_keys.index("filter_triggers")
     strip_idx = count_keys.index("filter_chip_strips")
     memo = {}
@@ -988,37 +1172,56 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
         node_rel, fn_name = node_key
         m_data = metas_by_rel.get(node_rel)
         s = m_data["by_name"].get(fn_name) if m_data else None
+        zeros = [0] * len(count_keys)
+        falses = [False] * len(count_keys)
         if not s or node_key in stack_path or len(stack_path) >= 4:
-            return 0, [fn_name], [0] * len(count_keys), False, False
+            return 0, [fn_name], zeros, zeros, falses, False, False, False
         max_d = s["max_depth"]
         best_chain = [fn_name]
         entries = list(s["local_entries"])
-        any_touched = s["touched"]
+        best_depth_touched = s["touched_depth"]
         local_deep = s["max_depth"] > cfg["max_container_depth"]
         child_deep = False
-        for qual, target, depth_at_call, _, bp, none_hint in s["calls"]:
+        child_modal_card = False
+        for qual, target, depth_at_call, call_touched, bp, none_hint in s["calls"]:
             callee_key = _resolve_callee(node_rel, m_data, qual, target, metas_by_rel)
             if not callee_key:
                 continue
-            cd, cchain, ctotals, ctouched, _ = compose(callee_key, stack_path + (node_key,))
-            any_touched = any_touched or ctouched
+            cd, cchain, ctotals, ct_max, chas_t, cdepth_touched, _, c_modal_card = compose(callee_key, stack_path + (node_key,))
+            if c_modal_card or (callee_key[0] == rel and callee_key[1] in local_modal_card_fns):
+                child_modal_card = True
             c_stats = metas_by_rel[callee_key[0]]["by_name"].get(callee_key[1], {})
             if c_stats.get("max_depth", 0) > cfg["max_container_depth"]:
                 child_deep = True
             cand = depth_at_call + cd
-            if cd > 0 and cand > max_d:
+            chain_touched = s["touched_depth"] or cdepth_touched or (call_touched and cd > 0)
+            if cd > 0 and (cand > max_d or (cand == max_d and not best_depth_touched and chain_touched)):
                 label = callee_key[1] if callee_key[0] == node_rel else f"{Path(callee_key[0]).stem}::{callee_key[1]}"
                 max_d, best_chain = cand, [fn_name] + ([label] + cchain[1:] if cchain else [])
+                best_depth_touched = chain_touched
             adj = list(ctotals)
+            t_adj = list(ct_max)
+            h_adj = list(chas_t)
             if none_hint:
                 adj[hint_idx] = 0
+                t_adj[hint_idx] = 0
+                h_adj[hint_idx] = False
             if MODAL_CALLEE_RE.search(callee_key[1]):
-                adj[primary_idx] = 0
-                adj[trigger_idx] = 0
-                adj[strip_idx] = 0
-            entries.append((bp, adj))
-        seq_totals = _aggregate_branches(entries, widths=len(count_keys))
-        res = (max_d, best_chain, seq_totals, any_touched, (any_touched and not local_deep and not child_deep))
+                for idx in (primary_idx, headline_idx, inner_card_idx, trigger_idx, strip_idx):
+                    adj[idx] = 0
+                    t_adj[idx] = 0
+                    h_adj[idx] = False
+            if call_touched:
+                for idx in range(len(count_keys)):
+                    if adj[idx] > 0:
+                        t_adj[idx] = adj[idx]
+                        h_adj[idx] = True
+            entries.append((bp, adj, t_adj, h_adj))
+        seq_totals, touched_totals, has_touched = _aggregate_branches_touched(entries, len(count_keys))
+        res = (
+            max_d, best_chain, seq_totals, touched_totals, has_touched, best_depth_touched,
+            (best_depth_touched and not local_deep and not child_deep), child_modal_card,
+        )
         if not stack_path:
             memo[node_key] = res
         return res
@@ -1030,6 +1233,8 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
          "make labels self-explanatory and cut redundant help icons"),
         ("primary_accents", "max_primary_accents", 1, "competing primary accents across composed view",
          "keep solid primary accent for the main CTA only; use neutral/surface fill for selected filters and toggles"),
+        ("headlines", "max_headlines", 0, "competing HEADLINE headings across composed view",
+         "keep one primary headline for the view/modal and step down inner section titles"),
         ("filter_triggers", "max_exposed_filters", 0, "exposed filter/sort dropdowns across composed view",
          "consolidate secondary filters/sorting into a single Filters menu and show active filter chips only when set"),
     ]
@@ -1041,9 +1246,10 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
         )
         if not is_entry:
             continue
-        max_d, best_chain, totals, any_touched, depth_clean = compose((rel, root_name))
-        if not any_touched and not root["touched"]:
+        max_d, best_chain, totals, touched_totals, has_touched, _, depth_clean, child_modal_card = compose((rel, root_name))
+        if not any(has_touched) and not depth_clean:
             continue
+        root_is_modal = is_modal_file or bool(MODAL_CALLEE_RE.search(root_name)) or root["has_modal_box"]
         if len(best_chain) >= 2 and depth_clean and max_d > cfg["max_container_depth"]:
             out.append(core.Finding(
                 rel, root["start"], "design",
@@ -1052,15 +1258,27 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
             ))
         for key, limit_key, extra_allowance, desc, fix in composed_specs:
             pos = count_keys.index(key)
-            limit = cfg[limit_key] + extra_allowance
-            if totals[pos] > limit and root["counts"][key] <= limit:
+            extra = 0 if (key == "primary_accents" and root_is_modal) else extra_allowance
+            limit = cfg[limit_key] + extra
+            if touched_totals[pos] > limit and root["counts"][key] <= limit:
                 out.append(core.Finding(
                     rel, root["start"], "design",
-                    f"{root_name} (composed): {totals[pos]} {desc} (limit {limit})",
+                    f"{root_name} (composed): {touched_totals[pos]} {desc} (limit {limit})",
                     fix,
                 ))
+        if (root_is_modal and root_name not in local_modal_card_fns and not child_modal_card
+                and (has_touched[inner_card_idx] or has_touched[cards_idx])
+                and (root["counts"]["cards"] >= 1 or root["has_modal_box"] or touched_totals[inner_card_idx] >= 1)
+                and (touched_totals[inner_card_idx] >= 1 or touched_totals[cards_idx] >= 2)):
+            out.append(core.Finding(
+                rel, root["start"], "design",
+                f"{root_name} (composed): inner boxed card inside a modal (nested surface)",
+                "flatten the inner card using whitespace and typography; the modal itself is already a card",
+            ))
         local_stacked = root["counts"]["filter_triggers"] >= 1 and root["counts"]["filter_chip_strips"] >= 1
-        if totals[trigger_idx] >= 1 and totals[strip_idx] >= 1 and not local_stacked:
+        if (totals[trigger_idx] >= 1 and totals[strip_idx] >= 1 and not local_stacked
+                and ((has_touched[trigger_idx] and touched_totals[trigger_idx] >= 1)
+                     or (has_touched[strip_idx] and touched_totals[strip_idx] >= 1))):
             out.append(core.Finding(
                 rel, root["start"], "design",
                 f"{root_name} (composed): stacked filter controls across composed view ({totals[trigger_idx]} trigger(s) + exposed filter-chip strip)",
@@ -1302,7 +1520,7 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
 
     out = []
     if suffix in core.CODE and "design" in wanted and not is_theme_file(rel):
-        _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens["uses_tooltips"], out, cache=cache)
+        _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens, out, cache=cache)
     if "style" in wanted:
         _style_checks(rel, raw_lines, suffix, look, skip, test_from, tokens, out)
     if "spacing" in wanted:
@@ -1336,8 +1554,14 @@ def stop_report(repo, session, state, gate, files=None, lean=False, style_only=F
         if not file_paths:
             return None
     styled = {p for p in file_paths if style_only or not lean or core.relative(p) in tics}
-    # Lean mode only words a hint with these; the repository walk (~90 ms) is for style checks.
-    tokens = discover_project_tokens(root) if styled else {"uses_tooltips": bool(core.C.raw.get("tooltip_calls"))}
+    # Lean mode skips the full style token walk, but still checks Rust kit helpers so hook == CLI.
+    if styled:
+        tokens = discover_project_tokens(root)
+    else:
+        tokens = {"uses_tooltips": bool(core.C.raw.get("tooltip_calls"))}
+        if any(p.suffix.lower() == ".rs" for p in file_paths):
+            ph, nph = _discover_kit_helpers(root)
+            tokens["primary_helpers"], tokens["non_primary_helpers"] = ph, nph
     cache = {}
     findings = []
     for path in file_paths:
@@ -1365,7 +1589,6 @@ def stop_report(repo, session, state, gate, files=None, lean=False, style_only=F
     limit = 4 if lean else 8
     with shown.open("a", encoding="utf-8") as handle:  # also the cut ones: never back in a later turn
         handle.write("\n".join(fresh) + "\n")
-    script_py = (HERE / "design_audit.py").as_posix()
     if style_only:
         lines = ["The tic fix hardcodes styles; use the project's tokens instead:", *core.report_lines(new[:limit])]
         return "\n".join(lines)
@@ -1843,6 +2066,295 @@ def selftest():
             if fn_expected not in same_pol_out:
                 problems.append(f"same_polarity_dirty.rs missed expected finding {fn_expected!r}:\n{same_pol_out}")
 
+        # Regression: GPUI modal states (Pending::Search/Register, searched_once, offers/keywords.is_empty())
+        # and GPUI design coverage (kit::segmented + kit::primary_button, inner visual::card + second HEADLINE).
+        tg_dir = web_repo / "src" / "screens" / "telegram_modal"
+        tg_dir.mkdir(parents=True, exist_ok=True)
+        tg_mod = tg_dir / "mod.rs"
+        tg_view = tg_dir / "view.rs"
+        tg_mod.write_text(
+            "pub(super) enum Pending {\n"
+            "    Search,\n"
+            "    Register,\n"
+            "}\n"
+            "pub struct TelegramModal {\n"
+            "    pub(super) pending: Option<Pending>,\n"
+            "    pub(super) searched_once: bool,\n"
+            "    pub(super) offers: Vec<String>,\n"
+            "    pub(super) keywords: Vec<String>,\n"
+            "    pub(super) error: Option<String>,\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tg_view.write_text(
+            "use gpui::{div, prelude::*, px};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "use crate::components::kit;\n"
+            "impl TelegramModal {\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        let searching = matches!(self.pending, Some(Pending::Search));\n"
+            "        let registering = matches!(self.pending, Some(Pending::Register));\n"
+            "        let bar = div()\n"
+            "            .flex()\n"
+            "            .child(kit::segmented(\"scope\", p))\n"
+            "            .child(kit::primary_button(\"search\", p, !searching && !registering));\n"
+            "        let monitor = visual::card(p)\n"
+            "            .child(div().text_size(px(visual::HEADLINE)).child(\"Monitorar\"))\n"
+            "            .when(self.keywords.is_empty(), |el| el.child(\"Sem alertas\"));\n"
+            "        let mut body = div()\n"
+            "            .bg(p.card)\n"
+            "            .border_1()\n"
+            "            .child(div().text_size(px(visual::HEADLINE)).child(\"Buscar no Telegram\"))\n"
+            "            .child(bar)\n"
+            "            .child(monitor);\n"
+            "        if let Some(err) = &self.error {\n"
+            "            body = body.child(err.clone());\n"
+            "        }\n"
+            "        if self.offers.is_empty() && self.searched_once {\n"
+            "            body = body.child(\"Nenhuma oferta encontrada\");\n"
+            "        }\n"
+            "        body\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        kit_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "pub fn primary_button(p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n"
+            "pub fn segmented(_id: &str, p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tg_states = discover_states([tg_view], root=web_repo)
+        if tg_states["enums"].get("Pending") != ["Search", "Register"]:
+            problems.append(f"discover_states missed Pending::Search/Register: {tg_states!r}")
+        for expected_branch in ("error", "keywords.is_empty()", "offers.is_empty()", "searched_once"):
+            if expected_branch not in tg_states["branches"]:
+                problems.append(f"discover_states missed GPUI state {expected_branch!r}: {tg_states!r}")
+        tg_tokens = discover_project_tokens(web_repo)
+        tg_out = "\n".join(str(f) for f in scan_file(tg_view, only=None, tokens=tg_tokens, checks={"design"}))
+        for needed in (
+            "competing primary accents",
+            "competing HEADLINE headings",
+            "inner boxed card inside a modal",
+        ):
+            if needed not in tg_out:
+                problems.append(f"telegram_modal/view.rs missing expected GPUI finding {needed!r}:\n{tg_out}")
+        # After refactoring kit::segmented to neutral fill and flattening the modal, 0 design findings remain.
+        kit_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "pub fn primary_button(p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n"
+            "pub fn segmented(_id: &str, p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.selected).text_color(p.strong)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tg_view.write_text(
+            "use gpui::{div, prelude::*, px};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "use crate::components::kit;\n"
+            "impl TelegramModal {\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        div()\n"
+            "            .bg(p.card)\n"
+            "            .border_1()\n"
+            "            .child(div().text_size(px(visual::HEADLINE)).child(\"Buscar no Telegram\"))\n"
+            "            .child(div().flex().child(kit::segmented(\"scope\", p)).child(kit::primary_button(\"search\", p, true)))\n"
+            "            .child(div().text_size(px(visual::EMPHASIS)).child(\"Monitorar\"))\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tg_tokens_clean = discover_project_tokens(web_repo)
+        tg_clean_out = scan_file(tg_view, only=None, tokens=tg_tokens_clean, checks={"design"})
+        if tg_clean_out:
+            problems.append(f"refactored telegram_modal/view.rs reported false positive(s): {[str(f) for f in tg_clean_out]!r}")
+
+        # Review regressions:
+        # 1) Non-modal screen with a modal helper must not flag page visual::card as modal inner card.
+        # 2) Lean kit helper discovery matches CLI for neutral kit::segmented.
+        # 3) Variant-bool kit helper (primary: bool) and method calls (.segmented()) must not false-positive.
+        # 4) .when(matches!(self.job, Some(SyncJob::Pull)), ...) must preserve SyncJob::Pull in --states.
+        # 5) 2-level modal helper chain (render -> body -> keywords_section) emits inner card once, not twice.
+        kit_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "pub fn primary_button(p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.primary).text_color(p.on_primary())\n"
+            "}\n"
+            "pub fn segmented(_id: &str, p: Palette) -> gpui::Div {\n"
+            "    div().bg(p.selected).text_color(p.strong)\n"
+            "}\n"
+            "pub fn button(_id: &str, primary: bool, p: Palette) -> gpui::Div {\n"
+            "    if primary { div().bg(p.primary) } else { div().bg(p.surface) }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        lean_ph, lean_nph = _discover_kit_helpers(web_repo)
+        if "segmented" not in lean_nph or "button" in lean_ph:
+            problems.append(f"_discover_kit_helpers misclassified segmented/button: ph={lean_ph!r} nph={lean_nph!r}")
+        page_with_modal = web_repo / "src" / "screens" / "settings_page.rs"
+        page_with_modal.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "use crate::components::kit;\n"
+            "impl SettingsPage {\n"
+            "    fn confirm_dialog(&self, p: Palette) -> impl IntoElement {\n"
+            "        visual::modal_card(p).child(\"Confirm\")\n"
+            "    }\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        div()\n"
+            "            .when(matches!(self.job, Some(SyncJob::Pull)), |el| el.child(\"Pulling\"))\n"
+            "            .child(visual::card(p).child(kit::button(\"cancel\", false, p)))\n"
+            "            .child(kit::primary_button(\"save\", p, true))\n"
+            "            .child(self.confirm_dialog(p))\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rev_tokens = discover_project_tokens(web_repo)
+        page_out = scan_file(page_with_modal, only=None, tokens=rev_tokens, checks={"design"})
+        if page_out:
+            problems.append(f"settings_page.rs reported false positive(s): {[str(f) for f in page_out]!r}")
+        page_states = discover_states([page_with_modal], root=web_repo)
+        if page_states["enums"].get("SyncJob") != ["Pull"]:
+            problems.append(f"discover_states dropped SyncJob::Pull inside .when(matches!(...)): {page_states!r}")
+        deep_modal = web_repo / "src" / "screens" / "deep_modal.rs"
+        deep_modal.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "impl DeepModal {\n"
+            "    fn keywords_section(&self, p: Palette) -> impl IntoElement {\n"
+            "        visual::card(p).child(\"Monitorar\")\n"
+            "    }\n"
+            "    fn body(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().child(self.keywords_section(p))\n"
+            "    }\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().bg(p.card).border_1().child(self.body(p))\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        deep_out = [f for f in scan_file(deep_modal, only=None, tokens=rev_tokens, checks={"design"})
+                    if "inner boxed card inside a modal" in f.problem]
+        if len(deep_out) != 1:
+            problems.append(f"deep_modal.rs expected 1 inner-card finding, got {len(deep_out)}: {[str(f) for f in deep_out]!r}")
+
+        # Regression: editing unrelated helpers (sources, quota_summary) must not re-fire pre-existing
+        # render (composed) findings from untouched tabs/headers, while touching a contributing element still fires.
+        games_view = web_repo / "src" / "screens" / "games_view.rs"
+        games_view.write_text(
+            "use gpui::{div, prelude::*, px};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "impl GamesView {\n"
+            "    fn header(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().text_size(px(visual::HEADLINE)).child(\"Jogos\")\n"
+            "    }\n"
+            "    fn tabs(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().text_size(px(visual::HEADLINE)).child(\"Abas\")\n"
+            "    }\n"
+            "    fn sources(&self, _p: Palette) -> impl IntoElement {\n"
+            "        div().child(\"Fontes atualizadas\")\n"
+            "    }\n"
+            "    fn quota_summary(&self, _p: Palette) -> impl IntoElement {\n"
+            "        div().child(\"Quota restante\")\n"
+            "    }\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        div()\n"
+            "            .child(self.header(p))\n"
+            "            .child(self.tabs(p))\n"
+            "            .child(self.sources(p))\n"
+            "            .child(self.quota_summary(p))\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        # Only lines 10-15 (sources + quota_summary) edited: pre-existing composed HEADLINE in header+tabs must stay silent.
+        partial_games = scan_file(games_view, only={10, 11, 12, 13, 14, 15}, tokens=rev_tokens, checks={"design"})
+        if partial_games:
+            problems.append(f"games_view.rs leaked pre-existing composed finding on unrelated helper edit: {[str(f) for f in partial_games]!r}")
+        # Full scan (--all) still catches render (composed) competing HEADLINE headings.
+        full_games = "\n".join(str(f) for f in scan_file(games_view, only=None, tokens=rev_tokens, checks={"design"}))
+        if "render (composed): 2 competing HEADLINE headings" not in full_games:
+            problems.append(f"games_view.rs --all missed composed HEADLINE finding:\n{full_games}")
+        # Editing a line that actually touches a HEADLINE still reports render (composed).
+        touched_headline = "\n".join(str(f) for f in scan_file(games_view, only={8}, tokens=rev_tokens, checks={"design"}))
+        if "render (composed): 2 competing HEADLINE headings" not in touched_headline:
+            problems.append(f"games_view.rs missed composed HEADLINE finding when tab HEADLINE was edited:\n{touched_headline}")
+
+        # Regression: branch-aware touched tracking — editing a clean tab's single HEADLINE must not
+        # trigger a pre-existing 2-HEADLINE finding from an untouched sibling tab.
+        tabbed_view = web_repo / "src" / "screens" / "tabbed_view.rs"
+        tabbed_view.write_text(
+            "use gpui::{div, prelude::*, px};\n"
+            "use crate::theme::{Palette, visual};\n"
+            "impl TabbedView {\n"
+            "    fn head_a(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().text_size(px(visual::HEADLINE)).child(\"A1\")\n"
+            "    }\n"
+            "    fn sub_a(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().text_size(px(visual::HEADLINE)).child(\"A2\")\n"
+            "    }\n"
+            "    fn tab_a(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().child(self.head_a(p)).child(self.sub_a(p))\n"
+            "    }\n"
+            "    fn tab_b(&self, p: Palette) -> impl IntoElement {\n"
+            "        div().text_size(px(visual::HEADLINE)).child(\"B1\")\n"
+            "    }\n"
+            "    pub fn render(&self, p: Palette) -> impl IntoElement {\n"
+            "        if self.tab == Tab::A {\n"
+            "            self.tab_a(p)\n"
+            "        } else {\n"
+            "            self.tab_b(p)\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tab_b_only = scan_file(tabbed_view, only={14}, tokens=rev_tokens, checks={"design"})
+        if tab_b_only:
+            problems.append(f"tabbed_view.rs leaked untouched tab_a finding when editing clean tab_b: {[str(f) for f in tab_b_only]!r}")
+        tab_all = "\n".join(str(f) for f in scan_file(tabbed_view, only=None, tokens=rev_tokens, checks={"design"}))
+        if "render (composed): 2 competing HEADLINE headings" not in tab_all:
+            problems.append(f"tabbed_view.rs --all missed composed HEADLINE finding:\n{tab_all}")
+        tab_a_edit = "\n".join(str(f) for f in scan_file(tabbed_view, only={8}, tokens=rev_tokens, checks={"design"}))
+        if "render (composed): 2 competing HEADLINE headings" not in tab_a_edit:
+            problems.append(f"tabbed_view.rs missed composed HEADLINE finding when tab_a was edited:\n{tab_a_edit}")
+
+        # Regression: enum struct variants + #[default] attributes preserved; string literals and inline // comments ignored in --states.
+        rich_enum_rs = web_repo / "src" / "screens" / "rich_enum.rs"
+        rich_enum_rs.write_text(
+            "use gpui::{div, prelude::*};\n"
+            "pub enum Pending {\n"
+            "    #[default]\n"
+            "    Idle,\n"
+            "    Register { id: i64, channel: String },\n"
+            "    Search,\n"
+            "}\n"
+            "pub struct RichScreen { offers: Vec<String>, searched_once: bool }\n"
+            "impl RichScreen {\n"
+            "    pub fn render(&self, key: &str) -> impl IntoElement {\n"
+            "        let _ = match key { // searched_once\n"
+            "            \"offers\" => 1,\n"
+            "            \"Fake::Variant\" => 2,\n"
+            "            _ => 0,\n"
+            "        };\n"
+            "        div()\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rich_states = discover_states([rich_enum_rs], root=web_repo)
+        if rich_states["enums"].get("Pending") != ["Idle", "Register", "Search"]:
+            problems.append(f"discover_states truncated enum with #[default]/struct variant: {rich_states!r}")
+        if "Fake" in rich_states["enums"] or "offers" in rich_states["branches"] or "searched_once" in rich_states["branches"]:
+            problems.append(f"discover_states polluted by string literal or inline comment: {rich_states!r}")
+
         # Regression: spacing.on_scale(spacing.nearest(v, steps), steps) invariant (no 38px->36px->36px loop, >256px)
         sample_steps = (2., 4., 6., 8., 10., 12., 14., 16., 20., 24.)
         if spacing.on_scale(38., sample_steps) or spacing.nearest(38., sample_steps) != 36.:
@@ -1865,12 +2377,17 @@ def selftest():
     return 1 if problems else 0
 
 
-STATE_ENUM_RE = re.compile(
-    r"\benum\s+(\w*(?:Tab|Modal|Dialog|State|Mode|Step|Category|View|Section|Filter|Page)\w*)\s*\{([^}]+)\}",
-    re.S,
+STATE_ENUM_NAME_RE = re.compile(
+    r"(?:Tab|Modal|Dialog|State|Mode|Step|Category|View|Section|Filter|Page|Pending|Status|Phase|Stage|Panel|Sheet|Drawer|Overlay|Source|Scope|Busy)"
+)
+RS_ENUM_HEAD_RE = re.compile(r"\benum\s+([A-Z]\w*)(?:<[^>]*>)?\s*\{")
+RS_STRUCT_BLOCK_RE = re.compile(r"\bstruct\s+[A-Z]\w*(?:<[^>]*>)?\s*\{([^}]+)\}", re.S)
+RS_STATE_FIELD_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]+)\s*:\s*(bool|Option\s*<|Vec\s*<|HashSet\s*<|BTreeSet\s*<|[A-Z]\w*)\b",
+    re.M,
 )
 TS_UNION_RE = re.compile(
-    r"\btype\s+(\w*(?:Tab|Modal|Dialog|State|Mode|Step|Category|View|Section|Filter|Page)\w*)\s*=\s*([^;\n]+)"
+    r"\btype\s+(\w*(?:Tab|Modal|Dialog|State|Mode|Step|Category|View|Section|Filter|Page|Pending|Status|Phase|Stage|Panel|Sheet|Drawer|Overlay|Source|Scope|Busy)\w*)\s*=\s*([^;\n]+)"
 )
 ROUTE_KEY_RE = re.compile(
     r'"([a-z][a-z0-9_-]{1,32})"\s*=>\s*(?:Self|[\w:]*(?:Screen|Tab|Modal|Dialog|State|Mode|Page|Step|Section|Route))::'
@@ -1880,13 +2397,79 @@ ENV_HOOK_RE = re.compile(
     r'(?:std::env::var|os\.environ(?:\.get)?)\(\s*["\']([A-Z][A-Z0-9_]{2,})["\']|process\.env\.([A-Z][A-Z0-9_]{2,})'
 )
 COND_STATE_RE = re.compile(
-    r"\b(?:match|if)\b[^\n{]*\b(loading|empty|error|offline|editing|deleting|confirm\w*|collapsed|expanded|modal|dialog)\b",
+    r"\b(?:match|if)\b[^\n{]*\b(loading|empty|error|offline|editing|deleting|confirm\w*|collapsed|expanded|modal|dialog|pending|searching|submitting|saving|busy)\b",
     re.I,
 )
+RS_COND_EXPR_RE = re.compile(
+    r"(?:\b(?:if\s+let\b|else\s+if\b|if\b|match\b)\s*([^\n{;]+)"
+    r"|\bmatches!\s*\(([^;\n]+)\)"
+    r"|^\s*([^/\n{}]+?)\s*=>)",
+    re.M,
+)
+RS_WHEN_CALL_RE = re.compile(r"\.(?:when|when_some|when_none)\s*\(")
+RS_ENUM_VARIANT_RE = re.compile(r"\b([A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*)::([A-Z][A-Za-z0-9]*)\b")
+RS_IS_EMPTY_RE = re.compile(r"(?<!\)\.)(?:\b(?:self|state|model)\.)*([a-z_][a-z0-9_]{2,})\.is_empty\(\)")
+RS_SELF_FIELD_RE = re.compile(r"\bself\.([a-z_][a-z0-9_]{2,})\b(?!\s*\()")
+STD_STATE_ENUM_SKIP = {
+    "Option", "Result", "Ordering", "Self", "FontWeight", "CursorStyle", "AlignItems", "JustifyContent",
+    "FlexDirection", "Overflow", "Position", "Display", "MouseButton", "Key", "Keystroke", "Modifiers",
+    "Length", "Edges", "Corners", "Rgba", "Hsla", "Pixels", "SharedString", "Entity", "FocusHandle",
+    "ScrollHandle", "Path", "PathBuf", "Duration", "Instant", "String", "Vec", "Box", "Arc", "Rc",
+    "Cow", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Window", "Context", "App", "Palette",
+}
+SKIP_STATE_FIELDS = {
+    "theme", "palette", "style", "cx", "ctx", "window", "view", "entity", "handle", "focus_handle",
+    "scroll_handle", "bounds", "size", "width", "height", "rect", "color", "bg", "fg", "id", "key",
+    "idx", "index", "offset", "scroll", "hovered", "pressed", "focused", "app", "client", "db",
+    "store", "sender", "tx", "rx", "task", "subscription", "subscriptions", "weak",
+}
+GENERIC_EMPTY_SKIP = {
+    "str", "text", "line", "val", "value", "raw", "trimmed", "buf", "out", "part",
+    "label", "title", "name", "path", "url", "msg", "err", "trim",
+}
+STATE_SIBLING_NAMES = ("mod.rs", "model.rs", "state.rs", "types.ts", "types.tsx")
+
+
+def _extract_braced_enums(src):
+    """Yields (name, body) for each enum with balanced braces so struct variants do not truncate the enum."""
+    for m in RS_ENUM_HEAD_RE.finditer(src):
+        depth, pos = 1, m.end()
+        while pos < len(src) and depth > 0:
+            ch = src[pos]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            pos += 1
+        if depth == 0:
+            yield m.group(1), src[m.end():pos - 1]
+
+
+def _parse_enum_variants(body):
+    out = []
+    for raw in core.split_top(body):
+        item = re.sub(r"#\[[^\]]*\]", "", raw)
+        item = item.split("(")[0].split("{")[0].split("=")[0].strip()
+        if item and re.match(r"^[A-Za-z_]\w*$", item):
+            out.append(item)
+    return out[:12]
+
+
+def _strip_rs_literals_and_inline_comments(src):
+    return "\n".join(re.sub(r"//.*$", "", _blank_literals(line)) for line in src.splitlines())
+
+
+def _code_without_tests_and_comments(src, suffix):
+    lines = src.splitlines()
+    if suffix == ".rs":
+        test_from = core.rust_test_start(lines)
+        if test_from:
+            lines = lines[:test_from - 1]
+    return "\n".join(l for l in lines if core.comment_of(l, suffix) is None)
 
 
 def discover_states(targets, root=None):
-    """Inventories UI states (enums, routes, modal/empty branches, env hooks, and optional state manifest)."""
+    """Inventories UI states (enums, routes, modal/empty/bool branches, env hooks, and optional state manifest)."""
     base = Path(root or core.REPO).resolve()
     paths = _expand_targets(targets) if targets else [p for _, p, _ in repo_ui_files(base)]
     seen = set()
@@ -1902,29 +2485,93 @@ def discover_states(targets, root=None):
             if prp not in seen:
                 seen.add(prp)
                 scan_list.append(prp)
+        if rp.parent.name.lower() not in GENERIC_UI_DIRS:
+            for sib_name in STATE_SIBLING_NAMES:
+                sib = (rp.parent / sib_name).resolve()
+                if sib.is_file() and sib not in seen and sib.stat().st_size <= core.MAX_BYTES:
+                    seen.add(sib)
+                    scan_list.append(sib)
 
+    sources = []
+    all_enums, struct_fields = {}, set()
     enums, routes, env_hooks, branch_states = {}, [], set(), set()
     screen_hints = {p.stem.lower() for p in scan_list} | {p.parent.name.lower() for p in scan_list}
     for p in scan_list:
         rel = core.relative(p)
         if core.is_test(rel) or p.suffix.lower() in STYLE_EXT or p.stat().st_size > core.MAX_BYTES:
             continue
-        src = p.read_text(encoding="utf-8", errors="replace")
-        for ename, body in STATE_ENUM_RE.findall(src):
-            variants = [v.strip().split("(")[0].split("{")[0].split("=")[0].strip() for v in body.split(",")]
-            clean = [v for v in variants if v and re.match(r"^[A-Za-z_]\w*$", v)]
-            if clean:
-                enums[ename] = clean[:12]
+        raw_src = p.read_text(encoding="utf-8", errors="replace")
+        suffix = p.suffix.lower()
+        src = _code_without_tests_and_comments(raw_src, suffix)
+        sources.append((p, suffix, raw_src, src))
+        if suffix == ".rs":
+            for ename, body in _extract_braced_enums(src):
+                clean = _parse_enum_variants(body)
+                if clean:
+                    all_enums[ename] = clean
+                    if STATE_ENUM_NAME_RE.search(ename):
+                        enums[ename] = clean
+            for sbody in RS_STRUCT_BLOCK_RE.findall(src):
+                for fname, ftype in RS_STATE_FIELD_RE.findall(sbody):
+                    if fname not in SKIP_STATE_FIELDS and ftype not in STD_STATE_ENUM_SKIP:
+                        struct_fields.add(fname)
+        else:
+            for ename, body in _extract_braced_enums(src):
+                if STATE_ENUM_NAME_RE.search(ename):
+                    clean = _parse_enum_variants(body)
+                    if clean:
+                        enums[ename] = clean
         for tname, rhs in TS_UNION_RE.findall(src):
             opts = re.findall(r"""['"]([A-Za-z0-9_-]+)['"]""", rhs)
             if opts:
                 enums[tname] = opts[:12]
+
+    for _, suffix, raw_src, src in sources:
         for m in ROUTE_KEY_RE.finditer(src):
             routes.append(m.group(1) or m.group(2))
-        for m in ENV_HOOK_RE.finditer(src):
+        for m in ENV_HOOK_RE.finditer(raw_src):
             env_hooks.add(m.group(1) or m.group(2))
         for m in COND_STATE_RE.finditer(src):
             branch_states.add(m.group(1).lower())
+        if suffix != ".rs":
+            continue
+        rs_code = _strip_rs_literals_and_inline_comments(src)
+        cond_exprs = [
+            m.group(1) or m.group(2) or m.group(3) or ""
+            for m in RS_COND_EXPR_RE.finditer(rs_code)
+        ]
+        src_lines = rs_code.splitlines()
+        for lineno, line in enumerate(src_lines, 1):
+            for wm in RS_WHEN_CALL_RE.finditer(line):
+                span, _ = copy_rules.call_span(src_lines, lineno, wm.end(), limit=6)
+                args = core.split_top(span.replace("\n", " "))
+                if args:
+                    cond_exprs.append(args[0])
+        for expr in cond_exprs:
+            for ename, variant in RS_ENUM_VARIANT_RE.findall(expr):
+                if ename in STD_STATE_ENUM_SKIP:
+                    continue
+                if ename in all_enums:
+                    enums.setdefault(ename, list(all_enums[ename]))
+                else:
+                    cur = enums.setdefault(ename, [])
+                    if variant not in cur and len(cur) < 12:
+                        cur.append(variant)
+            empty_fields = set()
+            for fname in RS_IS_EMPTY_RE.findall(expr):
+                if fname in struct_fields or fname not in GENERIC_EMPTY_SKIP:
+                    branch_states.add(f"{fname}.is_empty()")
+                    empty_fields.add(fname)
+            for fm in RS_SELF_FIELD_RE.finditer(expr):
+                fname = fm.group(1)
+                tail = expr[fm.end():]
+                if fname in SKIP_STATE_FIELDS or fname in empty_fields or tail.startswith(".is_empty()"):
+                    continue
+                branch_states.add(fname)
+            if struct_fields:
+                for tok in re.findall(r"\b([a-z_][a-z0-9_]{2,})\b", expr):
+                    if tok in struct_fields and tok not in SKIP_STATE_FIELDS and tok not in empty_fields:
+                        branch_states.add(tok)
 
     manifest = []
     states_rel = core.C.design.get("states_file")
