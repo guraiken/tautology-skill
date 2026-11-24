@@ -91,7 +91,7 @@ the table yet (add it to `synonyms` in the settings).
 
 - Massive tooltip: measured whole, even from a constant, `let`, `format!` or a literal split over lines,
   in balloon lines of `tooltip_line_chars` (46). Over 2 lines or one sentence: **shorten to the minimum**,
-  one one-line sentence with what the control does not show.
+  a single-line sentence with what the control does not show.
 - A confirmation of a destructive action may take 3 sentences: question, consequence, warning. Payment or
   legal copy in `sensitive_paths` gets no length finding: it is listed with the new texts, to shorten
   without losing the guarantee.
