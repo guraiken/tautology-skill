@@ -1,0 +1,20 @@
+# Conceptual (non-literal) duplication cases: one folder per fake repository.
+# "<case> + <text>": a near-duplicate finding containing <text> must appear.
+# "<case> - <text>": no near-duplicate finding may contain <text>.
+# "<case> 0": the case must give no near-duplicate finding.
+modals + 3 components re-implement the same shell
+modals + useEscapeKey
+restyle + restyled copy
+restyle + `variant`/`className` prop
+hooks + useOrders / useUsers
+hooks + one shared hook
+subset + subset variant
+subset + Enter only in CustomerSearchInput -> onEnter?
+gpui + FileFilter / ProjectSearch
+shadcn + 3 near-identical components
+empty + MembersEmptyState / NoProjects
+cssmod + TeamSearch / UserSearch
+vue + UserSearch / OrderFilter
+forwardref + UserSearchInput / TeamSearchInput
+pollution 0
+negatives 0

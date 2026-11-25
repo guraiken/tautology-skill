@@ -32,7 +32,8 @@ Before writing a new file (`*Input`, `*Modal`, `*Dialog`, `*Card`, `*Form`, `*To
 - **Duplicate UI helper:** a screen-local UI helper function (Rust multi-line/generic/`impl IntoElement`,
   TSX/JSX, Python Qt/Tk) that reimplements an exported UI helper or is duplicated across 2+ screen files.
 - **Near-duplicate component:** two UI components or hooks (`>=15` non-trivial lines) sharing >=72%
-  structural similarity across normalized token shingles (local vars -> `ID`, callbacks -> `CB`),
+  structural similarity (small units of 8-14 lines need >=88% plus shared hooks/events, shell chrome
+  or >=3 shared classes, so icon wrappers never match on shape alone) across normalized token shingles (local vars -> `ID`, callbacks -> `CB`),
   preserved style/chrome class tokens (`>=45%` when both use CSS classes), UI element skeleton, and
   hook/event behavior — with a parameterization summary of what is shared vs what varies. Components
   that already wrap the same shared shell (e.g., `<ModalShell>`) are discounted to avoid false nags.

@@ -133,6 +133,22 @@ def is_script(rel, suffix):
     return False
 
 
+HOOK_DIRS = {"hooks", "composables"}
+HOOK_EXPORT_RE = re.compile(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function\s+|const\s+)use[A-Z]\w*", re.M)
+
+
+def is_hook_file(rel, path):
+    """A React hook / Vue composable module: near-duplicate hooks are as worth unifying as components."""
+    if path.suffix.lower() not in (".ts", ".js", ".tsx", ".jsx", ".mjs"):
+        return False
+    if {p.lower() for p in Path(rel).parts[:-1]} & HOOK_DIRS:
+        return True
+    try:
+        return bool(HOOK_EXPORT_RE.search(path.read_text(encoding="utf-8", errors="replace")[:200_000]))
+    except OSError:
+        return False
+
+
 def _expand_suffixes(touched_suffixes):
     out = set(touched_suffixes)
     if out & {".vue", ".svelte"}:
@@ -259,6 +275,11 @@ def stop_report(repo, session, state, gate, files=None):
         if arch.is_component(rel):
             touched[rel] = changed
             triggers.append(f"new component {rel}" if new else f"changed component {rel}")
+            if new:
+                created.append(rel)
+        elif is_hook_file(rel, path):
+            touched[rel] = changed
+            triggers.append(f"new hook {rel}" if new else f"changed hook {rel}")
             if new:
                 created.append(rel)
         elif new and is_script(rel, path.suffix.lower()):

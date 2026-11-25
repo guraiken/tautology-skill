@@ -40,12 +40,27 @@ MIN_CALLS = 4      # chain: calls in a row
 MIN_COUNT = 4      # chain: times in total
 MIN_FILES = 3      # chain: different files
 MIN_BLOCK = 6      # block: equal non-blank lines
-MIN_UNIT_LINES = 15  # near-duplicate component: minimum non-trivial lines
+MIN_UNIT_LINES = 15  # near-duplicate component: full-size unit (normal score threshold)
+MIN_SMALL_UNIT_LINES = 8  # small units (8-14 lines) qualify with a stricter score and shared structure
 MIN_COMP_SCORE = 0.72
+MIN_SMALL_COMP_SCORE = 0.88
+MIN_SMALL_SHARED_CLASSES = 3
 MIN_CLASS_SIM = 0.45
 MIN_CREATED_SCORE = 0.65
 MIN_CREATED_LINES = 10
 COMPOSITION_DISCOUNT = 0.25
+BEHAV_PROP_HINT = {
+    "setTimeout": "debounceMs?", "setInterval": "pollMs?", "Enter": "onEnter?", "Escape": "closeOnEscape?",
+    "keydown": "onKeyDown?", "focus": "autoFocus?", "stopPropagation": "closeOnBackdrop?", "preventDefault": "onSubmit?",
+    "useEffect": "an effect prop/hook", "addEventListener": "a shared hook",
+}
+MIN_FAMILY_SCORE = 0.90  # pairs at or above this chain into one "N near-identical components" finding
+MIN_PLAIN_SHINGLE = 0.70  # a plain near-duplicate needs this much code-shape agreement on top of the score
+MIN_ROLE_SCORE = 0.50    # same role cue (search input) + same markup, different handlers
+MIN_CHROME_SCORE = 0.62  # identical classes + markup, small presentational unit (empty states)
+MIN_CONTAINMENT = 0.85   # subset variant: share of the small unit's shingles found in the large one
+SHELL_CUES = {"overlay_backdrop", "escape_keydown", "modal_chrome"}
+MIN_SHELL_SCORE = 0.40   # 2+ shared raw shell cues report a shell to extract from this score up
 PER_ROUND = 3      # patterns per hook round
 
 # Framework idiom: chains of only these methods, with trivial arguments, are the normal way to write.
@@ -204,7 +219,7 @@ _JS_TOKENS_BLANK = re.compile(
     r"|(?P<bc>/\*[\s\S]*?\*/)"
     r"|(?P<hc><!--[\s\S]*?-->)"
     r"|(?P<lc>//[^\n]*)"
-    r"|(?P<tpl>`(?:\$\{(?:[^{}]|\{[^{}]*\})*\}|[^`\\]|\\[\s\S])*`)"
+    r"|(?P<tpl>`(?:\$\{(?:[^{}]|\{[^{}]*\})*\}|\$(?!\{)|[^`\\$]|\\[\s\S])*`)"
     r'|(?P<dq>"(?:[^"\\\n]|\\.)*")'
     r"|(?P<sq>(?<![A-Za-z])'(?:[^'\\\n]|\\.)*')"
 )
@@ -214,7 +229,7 @@ _JS_TOKENS_KEEP_CLASS = re.compile(
     r"|(?P<hc><!--[\s\S]*?-->)"
     r"|(?P<lc>//[^\n]*)"
     r'|(?P<cls>\b(?:className|class)\s*=\s*(?:"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'))'
-    r"|(?P<tpl>`(?:\$\{(?:[^{}]|\{[^{}]*\})*\}|[^`\\]|\\[\s\S])*`)"
+    r"|(?P<tpl>`(?:\$\{(?:[^{}]|\{[^{}]*\})*\}|\$(?!\{)|[^`\\$]|\\[\s\S])*`)"
     r'|(?P<dq>"(?:[^"\\\n]|\\.)*")'
     r"|(?P<sq>(?<![A-Za-z])'(?:[^'\\\n]|\\.)*')"
 )
@@ -369,6 +384,11 @@ RS_FN_RE = re.compile(
     r"(?P<name>[A-Za-z_]\w*)(?:\s*<[^>{;]*>)?\s*\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;]+))?\{",
     re.M,
 )
+RS_FN_HEAD_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<pub>pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>{;(]*>)?\s*\(",
+    re.M,
+)
+RS_RENDER_IMPL_RE = re.compile(r"\bimpl(?:\s*<[^>{]*>)?\s+(?:Render|RenderOnce|IntoElement|Element)\s+for\s+(?P<ty>[A-Z]\w*)[^{]*\{")
 RS_UI_RET = re.compile(r"\b(Div|AnyElement|IntoElement|Element|Button|Stateful|ToggleGroup|Svg|View|Response|Widget)\b")
 JS_FN_RE = re.compile(
     r"^(?P<pub>export\s+(?:default\s+)?)?(?:async\s+)?function\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>{;]*>)?\s*\((?P<params>[^)]*)\)",
@@ -379,6 +399,60 @@ JS_ARROW_RE = re.compile(
     r"(?:(?:React\.)?(?:memo|forwardRef)\s*(?:<[^>]*>)?\s*\(\s*)?(?:async\s+)?(?:\((?P<params>[^)]*)\)|(?P<param>[A-Za-z_]\w*))\s*(?::[^=\n]+)?=>",
     re.M,
 )
+JS_DECL_RE = re.compile(
+    r"^(?P<pub>export\s+(?:default\s+)?)?(?:"
+    r"(?:const|let)\s+(?P<name>[A-Za-z_]\w*)(?=\s*[:=])"
+    r"|(?<=default )\s*[\w.]+\s*(?:<[^>\n]*>)?\s*\(\s*(?:[\w.]+\s*\(\s*)?function\s+(?P<dname>[A-Z]\w*)"
+    r"|class\s+(?P<cname>[A-Z]\w*)\s+extends\s+(?:React\.)?(?:Pure)?Component\b)",
+    re.M,
+)
+
+
+def _js_statement_end(clean, pos):
+    """End of a `const X ... = ...` statement: skip the type annotation up to the top-level `=`, then follow
+    balanced ()[]{} groups (and generic `<...>` arguments) until the expression stops continuing."""
+    n = len(clean)
+    depth, i = 0, pos
+    while i < n:  # find the assignment `=` at depth 0 (not `=>`, `==`)
+        ch = clean[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "=" and depth == 0 and clean[i + 1:i + 2] not in ("=", ">") and clean[i - 1:i] not in "=!<>":
+            break
+        elif ch in ";\n" and depth == 0 and ch == ";":
+            return -1
+        i += 1
+    else:
+        return -1
+    i += 1
+    depth, opened = 0, False
+    while i < n:
+        ch = clean[i]
+        if clean.startswith("=>", i):
+            i += 2
+            continue
+        if ch in "([{":
+            depth += 1
+            opened = True
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0 and opened:
+                j = i + 1
+                while j < n and clean[j] in " \t\r\n":
+                    j += 1
+                nxt = clean[j:j + 2]
+                if not (nxt[:1] in ("(", ".", "?", ":", "<", ">", "[", "{", "&", "|") or nxt == "=>"):
+                    return i + 1
+        elif ch == ";" and depth == 0:
+            return i
+        elif ch == "\n" and depth == 0 and not opened and clean[pos:i].strip().split("=", 1)[-1].strip():
+            return i  # `const X = styled.div` ... no call/body on this line: not a component declaration
+        i += 1
+    return n
+
+
 PY_UNIT_RE = re.compile(r"^(?P<kind>def|class)\s+(?P<name>[A-Za-z_]\w*)\s*(?:\((?P<params>[^)]*)\))?\s*(?:->[^:]+)?:", re.M)
 PY_UI_HINT = re.compile(r"\b(QWidget|QPushButton|QLabel|QVBoxLayout|QHBoxLayout|QDialog|QFrame|QLineEdit|tk\.|ttk\.)\b")
 
@@ -399,11 +473,29 @@ KEEP_TOKENS = {
 }
 SEMANTIC_STRINGS = {"Escape", "Enter", "keydown", "keyup", "search", "dialog", "button", "submit", "text", "checkbox", "radio"}
 BEHAV_RE = re.compile(
-    r"\b(use[A-Z]\w*|setTimeout|setInterval|addEventListener|stopPropagation|preventDefault|focus|blur|"
-    r"keydown|keyup|Escape|Enter|on_click|on_change|on_key_down|keyPressEvent|textChanged|returnPressed|QTimer)\b"
+    r"\b(use[A-Z]\w*|setTimeout|setInterval|addEventListener|stopPropagation|preventDefault|"
+    r"keydown|keyup|Escape|Enter|on_click|on_change|on_key_down|keyPressEvent|textChanged|returnPressed|QTimer|"
+    r"on_action|on_mouse_down|on_key_down|track_focus|focus_handle)\b"
 )
+FOCUS_CALL_RE = re.compile(r"\.(focus|blur)\s*\(|\b(?:on)(Focus|Blur)\s*=")
+# Vue / Svelte behaviour vocabulary (event modifiers keep their key: @keydown.esc, on:keydown, v-model)
+SFC_BEHAV_RE = re.compile(
+    r"(?<=\s)(?:(@|v-on:|on:)(\w+)((?:\.\w+)*)(?=\s*=)|(v-model|bind:value|bind:this)|"
+    r"\b(watch|watchEffect|computed|defineEmits|defineProps|emit|onMounted|onUnmounted|onMount|onDestroy|"
+    r"createEventDispatcher|nextTick)\b\s*\()"
+)
+
+
+def _sfc_behav_token(m):
+    if m.group(1):
+        mods = m.group(3) or ""
+        key = {"esc": "Escape", "escape": "Escape", "enter": "Enter"}.get(mods.lstrip(".").split(".")[0].lower(), "")
+        return f"on:{m.group(2)}" + (f".{key}" if key else "")
+    return m.group(4) or m.group(5)
 CLASS_ATTR_RE = re.compile(r"""\b(?:className|class)\s*=\s*(?:"([^"\n]+)"|'([^'\n]+)'|\{([^}\n]+)\})""")
 CLASS_STR_RE = re.compile(r"""["'`]([^"'`\n]+)["'`]""")
+CLASS_FN_RE = re.compile(r"\b(?:cn|clsx|classnames|classNames|twMerge|twJoin|cva)\s*\(")
+CSS_MODULE_RE = re.compile(r"""\b(?:styles|classes|css)\s*(?:\.\s*(\w+)|\[\s*["'](\w[\w-]*)["']\s*\])""")
 JSX_TAG_RE = re.compile(r"(?<![A-Za-z0-9_$\]])<([A-Za-z]\w*)(?=[\s/>])")
 JSX_RETURN_ROOT_RE = re.compile(r"(?:\breturn\s*\(?|=>\s*\()\s*<([A-Z]\w*)(?=[\s/>])")
 UI_ROLE_SUFFIX_RE = re.compile(
@@ -476,7 +568,7 @@ def _extract_props(params_text):
             continue
         p = p.split("=")[0].split(":")[0].strip()
         p = re.sub(r"^(?:mut|ref)\s+", "", p)
-        if re.fullmatch(r"[A-Za-z_]\w*", p) and p not in ("self", "cls", "props", "ctx", "cx", "window"):
+        if re.fullmatch(r"[A-Za-z]\w*", p) and p not in ("self", "cls", "props", "ctx", "cx", "window"):
             props.add(p)
     return props
 
@@ -490,9 +582,19 @@ def _fingerprint_unit(rel, line, end_line, name, lang, is_exported, body, params
             raw_cls = m.group(1) or m.group(2)
             if raw_cls:
                 classes.update(t for t in raw_cls.split() if t)
-            elif m.group(3):
-                for sm in CLASS_STR_RE.finditer(m.group(3)):
+            elif m.group(3) and not CLASS_FN_RE.search(m.group(3)):
+                expr = m.group(3)
+                for sm in CLASS_STR_RE.finditer(expr):
                     classes.update(t for t in sm.group(1).split() if t and not t.startswith("${"))
+                # CSS modules: className={styles.card} -> a class token per module key
+                classes.update("mod:" + (k1 or k2) for k1, k2 in CSS_MODULE_RE.findall(expr))
+        # cn()/clsx()/cva()/twMerge() calls, also when they span several lines
+        for m in CLASS_FN_RE.finditer(body):
+            end = _find_balanced_end(body, m.end() - 1, "(", ")")
+            for sm in CLASS_STR_RE.finditer(body[m.end():end]):
+                classes.update(t for t in sm.group(1).split() if t and not t.startswith("${"))
+        if suffix in (".vue", ".svelte"):
+            classes = Counter()  # scoped SFC class names never match across files; compare template + script only
     elif lang == "rs":
         classes.update(STYLE.findall(body))
     elif lang == "py":
@@ -506,9 +608,6 @@ def _fingerprint_unit(rel, line, end_line, name, lang, is_exported, body, params
         tags.update(re.findall(r"\b(div|h_flex|v_flex|svg|img|(?:kit|visual)::\w+)\s*\(", body))
     elif lang == "py":
         tags.update(re.findall(r"\b(Q[A-Z]\w*|ttk\.\w+)\b", body))
-
-    # Channel 4: behavioral / hook / event primitives
-    behav = set(BEHAV_RE.findall(body))
 
     # Channel 1: role-preserving normalized 3-token shingles
     # Keep semantic string literals (Escape, Enter, keydown, search, dialog) while blanking arbitrary text and classes.
@@ -526,7 +625,14 @@ def _fingerprint_unit(rel, line, end_line, name, lang, is_exported, body, params
         return "STR"
     tok_re = _JS_TOKENS_KEEP_CLASS if lang == "js" else (_RS_TOKENS if lang == "rs" else _PY_TOKENS)
     cleaned = tok_re.sub(_clean_tok, body)
-    raw_toks = re.findall(r"[A-Za-z_]\w*|\d+|[{}()<>=\[\].,;?!&|]+", cleaned)
+
+    # Channel 4: behavioral / hook / event primitives, read from the string/class-blanked body so Tailwind
+    # text (`focus-visible:`, `backdrop-blur`) never counts; focus/blur only as calls or handlers.
+    behav = set(BEHAV_RE.findall(cleaned)) | {m.group(1) or m.group(2).lower() for m in FOCUS_CALL_RE.finditer(cleaned)}
+    if lang == "js" and suffix in (".vue", ".svelte"):
+        behav |= {_sfc_behav_token(m) for m in SFC_BEHAV_RE.finditer(body)}
+    behav.discard(name)  # a hook's own name is not shared behaviour
+    raw_toks =re.findall(r"[A-Za-z_]\w*|\d+|[{}()<>=\[\].,;?!&|]+", cleaned)
     own_props_types = {name, f"{name}Props"}
     norm_toks = []
     for t in raw_toks:
@@ -557,7 +663,7 @@ def _fingerprint_unit(rel, line, end_line, name, lang, is_exported, body, params
     raw_shell_cues = set()
     if "fixed" in classes and "inset-0" in classes:
         raw_shell_cues.add("overlay_backdrop")
-    if "keydown" in behav and "Escape" in behav:
+    if ("keydown" in behav and "Escape" in behav) or "on:keydown.Escape" in behav or "on:keyup.Escape" in behav:
         raw_shell_cues.add("escape_keydown")
     if "input" in tags and ("search" in cleaned or "setTimeout" in behav):
         raw_shell_cues.add("search_input")
@@ -625,20 +731,65 @@ def _extract_units(rel, text, clean, suffix):
                 end_line = text.count("\n", 0, end_pos) + 1
                 params = m.groupdict().get("params") or m.groupdict().get("param") or ""
                 units.append(_fingerprint_unit(rel, line, end_line, name, "js", bool(m.group("pub")), body, params, suf))
+        # Wrapped / typed declarations the two regexes miss: forwardRef<A, B & {...}>(...), memo(forwardRef(...)),
+        # observer(...), generic arrows <T,>(...), React.FC<{ cb: () => void }>, export default memo(function X(...)),
+        # and class components. The whole declaration statement is the unit.
+        for m in JS_DECL_RE.finditer(clean):
+            if m.start() in seen_starts:
+                continue
+            name = m.group("name") or m.group("dname") or m.group("cname")
+            if not (name[0].isupper() or re.match(r"^use[A-Z]", name)):
+                continue
+            if m.group("cname"):
+                brace = clean.find("{", m.end())
+                end_pos = _find_balanced_end(clean, brace, "{", "}") if brace != -1 else -1
+            elif m.group("dname"):
+                paren = clean.find("(", m.start() + len(m.group("pub") or ""))
+                end_pos = _find_balanced_end(clean, paren, "(", ")")
+            else:
+                end_pos = _js_statement_end(clean, m.end())
+            if end_pos <= m.end():
+                continue
+            seen_starts.add(m.start())
+            body = text[m.start():end_pos]
+            if not name.startswith("use") and not UI_MARKUP.search(body):
+                continue
+            pm = re.search(r"\(\s*(\{[^{}]*\})", clean[m.end():end_pos]) or re.search(
+                r"\{([^{}]*)\}\s*=\s*this\.props", clean[m.end():end_pos])
+            params = text[m.end() + pm.start(1):m.end() + pm.end(1)] if pm else ""
+            line = text.count("\n", 0, m.start()) + 1
+            end_line = text.count("\n", 0, end_pos) + 1
+            units.append(_fingerprint_unit(rel, line, end_line, name, "js", bool(m.group("pub")), body, params, suf))
         return units
     if suf == ".rs":
-        for m in RS_FN_RE.finditer(text):
-            if m.group("indent"):
+        # GPUI views: `impl Render/RenderOnce for X { fn render(...) }` -> one unit named after X
+        render_impls = []
+        for im in RS_RENDER_IMPL_RE.finditer(clean):
+            brace = clean.find("{", im.end() - 1)
+            render_impls.append((brace, _find_balanced_end(clean, brace, "{", "}"), im.group("ty")))
+        for m in RS_FN_HEAD_RE.finditer(clean):
+            p_open = m.end() - 1
+            p_close = _find_balanced_end(clean, p_open, "(", ")")  # closure params: impl Fn(&mut Window) + 'static
+            brace = p_close
+            while brace < len(clean) and clean[brace] not in "{;":
+                brace += 1
+            if brace >= len(clean) or clean[brace] != "{":
                 continue
-            ret = (m.group("ret") or "").strip()
-            open_pos = m.end() - 1
-            end_pos = _find_balanced_end(clean, open_pos, "{", "}")
+            ret = clean[p_close:brace]
+            name, is_pub = m.group("name"), bool(m.group("pub"))
+            if m.group("indent"):
+                owner = next((ty for s0, e0, ty in render_impls if s0 < m.start() < e0), None)
+                if owner and name == "render":
+                    name, is_pub = owner, True
+                elif not RS_UI_RET.search(ret):
+                    continue  # methods and nested fns that build no UI
+            end_pos = _find_balanced_end(clean, brace, "{", "}")
             body = text[m.start():end_pos]
             if not (RS_UI_RET.search(ret) or UI_GENERAL.search(body)):
                 continue
             line = text.count("\n", 0, m.start()) + 1
             end_line = text.count("\n", 0, end_pos) + 1
-            units.append(_fingerprint_unit(rel, line, end_line, m.group("name"), "rs", bool(m.group("pub")), body, m.group("params") or "", suf))
+            units.append(_fingerprint_unit(rel, line, end_line, name, "rs", is_pub, body, text[p_open + 1:p_close - 1], suf))
         return units
     if suf == ".py":
         lines = text.splitlines()
@@ -738,10 +889,25 @@ class Index:
             self.chains.append((rel, line, [(n, a) for n, a, _ in segment]))
 
 
+IMPORT_LINE_RE = re.compile(r"(?:import|export)\b.*\bfrom\b|import\s+[\w\"'*{]|use\s+[\w:]+.*;$|from\s+\S+\s+import\b")
+IMPORT_OPEN_RE = re.compile(r"(?:import|export)\s+(?:type\s+)?\{[^}]*$|use\s+[\w:]+::\{[^}]*$|from\s+\S+\s+import\s+\($")
+
+
 def normalized_lines(flat):
     out = []
+    in_import = False
     for number, raw in enumerate(flat.splitlines(), 1):
         line = re.sub(r"\s+", " ", raw.strip())
+        # import/use lists are not code to extract: skip single-line and multi-line `import { ... } from`
+        if in_import:
+            if line.startswith("}") or line.endswith((";", ")")) or " from " in f" {line} ":
+                in_import = False
+            continue
+        if IMPORT_OPEN_RE.match(line):
+            in_import = True
+            continue
+        if IMPORT_LINE_RE.match(line):
+            continue
         if not line or line.startswith(("//", "#", "/*", "*", "--")) or len(line) < 12:
             continue
         if re.fullmatch(r"[\s{}()\[\];,]*|(\} )?else \{|return;?|Ok\(\(\)\)|None|\.into\(\),?|\.into_any_element\(\),?", line):
@@ -929,32 +1095,59 @@ def _score_pair(u1, u2):
     if u1.lang != u2.lang:
         return 0.0, {}
     lo, hi = min(u1.nontrivial_lines, u2.nontrivial_lines), max(u1.nontrivial_lines, u2.nontrivial_lines)
-    if hi == 0 or (lo / hi) < 0.45:
+    if hi == 0:
+        return 0.0, {}
+    if (lo / hi) < 0.6 and lo >= MIN_SMALL_UNIT_LINES:
+        # Subset variant: the small unit is the large one minus an optional feature (the classic "add a prop").
+        small, large = (u1, u2) if u1.nontrivial_lines <= u2.nontrivial_lines else (u2, u1)
+        total = sum(small.shingles.values())
+        contain = sum((small.shingles & large.shingles).values()) / total if total else 0.0
+        cls_ok = not small.classes or sum((small.classes & large.classes).values()) >= 0.8 * sum(small.classes.values())
+        if contain >= MIN_CONTAINMENT and small.behav <= large.behav and cls_ok and (small.behav or small.classes):
+            return contain, {"shingle": contain, "subset": small.name}
+    if (lo / hi) < 0.45:
         return 0.0, {}
     s_shingle = _dice(u1.shingles, u2.shingles)
     s_class = _dice(u1.classes, u2.classes)
     s_tag = _dice(u1.tags, u2.tags)
     s_behav = _jaccard(u1.behav, u2.behav)
+    detail = {"shingle": s_shingle, "class": s_class, "tag": s_tag, "behav": s_behav}
+    has_tags = bool(u1.tags or u2.tags)
 
-    if u1.classes and u2.classes:
+    if not has_tags and not (u1.classes or u2.classes):
+        # Non-UI hooks: no markup channels, so the score is shape + behaviour only.
+        score = 0.75 * s_shingle + 0.25 * s_behav
+    elif u1.classes and u2.classes:
         if s_class < MIN_CLASS_SIM:
-            return 0.0, {"shingle": s_shingle, "class": s_class, "tag": s_tag, "behav": s_behav}
+            # Soft class gate: a restyled copy of the same component (different Tailwind/BEM/CSS-module classes)
+            # is still one component with a `variant`/`className` prop; only report it when the rest is near-identical.
+            # Coincidental shape with no shared behaviour (PricingCard vs ErrorBanner) stays separate.
+            score = 0.55 * s_shingle + 0.25 * s_tag + 0.20 * s_behav
+            detail["behaviour_score"] = score
+            if s_shingle < 0.75 or s_behav < 0.6 or not (u1.behav & u2.behav - {"useState"}) or score < MIN_COMP_SCORE:
+                return 0.0, detail
+            detail["style_variant"] = True
+            return score, detail
         score = 0.45 * s_shingle + 0.25 * s_class + 0.15 * s_tag + 0.15 * s_behav
     elif u1.classes or u2.classes:
-        score = 0.45 * s_shingle + 0.15 * s_tag + 0.15 * s_behav
+        score = (0.45 * s_shingle + 0.15 * s_tag + 0.15 * s_behav) / 0.75
     elif u1.behav or u2.behav:
         score = 0.55 * s_shingle + 0.25 * s_tag + 0.20 * s_behav
     else:
         score = 0.70 * s_shingle + 0.30 * s_tag
 
     # Composition discount: if both units already wrap the same shared shell component (e.g., <ModalShell>),
-    # discount similarity unless both re-implement raw shell chrome primitives.
+    # discount similarity unless both re-implement raw shell chrome primitives, or the bodies inside the shared
+    # wrappers are themselves near-identical copies (copy-pasted shadcn AlertDialog confirm dialogs).
     shared_root = bool(u1.root_wrapper and u1.root_wrapper == u2.root_wrapper)
     shared_shell_wrapper = bool((u1.wrappers & u2.wrappers) and not (u1.raw_shell_cues & u2.raw_shell_cues))
-    if shared_root or (shared_shell_wrapper and (u1.root_wrapper in u2.wrappers or u2.root_wrapper in u1.wrappers)):
+    # 3+ shared composite parts (AlertDialog, AlertDialogContent, AlertDialogFooter...) copied verbatim are one
+    # composite re-implemented; a single shared <ModalShell> wrapper means reuse already happened.
+    copied_composite = s_shingle >= 0.85 and u1.wrappers == u2.wrappers and len(u1.wrappers) >= 3
+    if not copied_composite and (shared_root or (shared_shell_wrapper and (u1.root_wrapper in u2.wrappers or u2.root_wrapper in u1.wrappers))):
         score = max(0.0, score - COMPOSITION_DISCOUNT)
 
-    return score, {"shingle": s_shingle, "class": s_class, "tag": s_tag, "behav": s_behav}
+    return score, detail
 
 
 def _param_diff(u1, u2):
@@ -972,10 +1165,23 @@ def _param_diff(u1, u2):
             shared_parts.append("elements: " + ", ".join(shared_tags))
 
     varies_parts = []
-    cb_diff = sorted((u1.callbacks - u2.callbacks) | (u2.callbacks - u1.callbacks))
+    # Behaviour difference first, mapped to the optional prop that would absorb it.
+    b_only = [(t, u1.name) for t in sorted(u1.behav - u2.behav)] + [(t, u2.name) for t in sorted(u2.behav - u1.behav)]
+    b_only = [(t, n) for t, n in b_only if t not in ("useState", "useRef", "useMemo", "useCallback")]
+    if b_only:
+        varies_parts.append("behaviour: " + ", ".join(
+            f"{t} only in {n}" + (f" -> {BEHAV_PROP_HINT[t]}" if t in BEHAV_PROP_HINT else "") for t, n in b_only[:3]))
+    # Callbacks: declared props only (local handlers are implementation), entity names normalized out
+    # (handleUserClear vs handleOrderClear are the same handler).
+    def _cbs(u):
+        cbs = {c for c in u.callbacks if c in u.props} if u.props else set(u.callbacks)
+        ent = UI_ROLE_SUFFIX_RE.sub("", u.name)
+        return {c.replace(ent, "") if ent and len(ent) > 2 else c for c in cbs}
+    c1, c2 = _cbs(u1), _cbs(u2)
+    cb_diff = sorted(c1 ^ c2)
     if cb_diff:
-        varies_parts.append("callbacks: " + ", ".join(cb_diff[:4]))
-    prop_diff = sorted(((u1.props - u2.props) | (u2.props - u1.props)) - set(cb_diff))
+        varies_parts.append("callbacks: " + ", ".join(f"{c}?" for c in cb_diff[:4]))
+    prop_diff = sorted(((u1.props - u2.props) | (u2.props - u1.props)) - set(u1.callbacks | u2.callbacks))
     if prop_diff:
         varies_parts.append("props: " + ", ".join(prop_diff[:4]))
     tag_diff = sorted((set(u1.tags) - set(u2.tags)) | (set(u2.tags) - set(u1.tags)))
@@ -997,7 +1203,7 @@ def _candidate_pairs(units, touched):
     """O(K*N) when touched is set (Stop hook); pre-bucketed inverted index for --all."""
     by_lang = defaultdict(list)
     for u in units:
-        if u.nontrivial_lines >= MIN_UNIT_LINES:
+        if u.nontrivial_lines >= MIN_SMALL_UNIT_LINES:
             by_lang[u.lang].append(u)
 
     pairs = []
@@ -1020,8 +1226,11 @@ def _candidate_pairs(units, touched):
         else:
             # Pre-bucket by structural keys to avoid blind O(N^2) on huge repos.
             buckets = defaultdict(list)
+            # Rare shingles (IDF-style) as extra keys: two near-copies share their rarest shingles, so they still
+            # collide when every chrome bucket (`div`, `flex`, useState) is too generic and gets dropped.
+            df = Counter(sh for u in lang_units for sh in u.shingles)
             for idx, u in enumerate(lang_units):
-                keys = set()
+                keys = {("sh", sh) for sh in sorted((sh for sh in u.shingles if df[sh] >= 2), key=lambda sh: (df[sh], sh))[:6]}
                 if u.role_suffix:
                     keys.add(("role", u.role_suffix))
                 for b in u.behav:
@@ -1046,10 +1255,25 @@ def _candidate_pairs(units, touched):
     return pairs
 
 
+def _pair_threshold(a, b):
+    """Score a pair must reach: full-size units use MIN_COMP_SCORE; a pair with a small unit (8-14 lines)
+    needs MIN_SMALL_COMP_SCORE plus shared behaviour, shell chrome or classes, so tiny wrappers
+    (icons, one-tag helpers) never match on shape alone. None: the pair is not eligible."""
+    if min(a.nontrivial_lines, b.nontrivial_lines) >= MIN_UNIT_LINES:
+        return MIN_COMP_SCORE
+    shared_structure = (
+        bool(a.behav & b.behav)
+        or bool(a.raw_shell_cues & b.raw_shell_cues)
+        or len(set(a.classes) & set(b.classes)) >= MIN_SMALL_SHARED_CLASSES
+    )
+    return MIN_SMALL_COMP_SCORE if shared_structure else None
+
+
 def component_patterns(index, touched=None):
     """Detects structurally near-duplicate UI components/hooks that can be unified via props or shell composition."""
     out = []
     seen_pairs = set()
+    shell_groups, plain = [], []
     for u1, u2 in _candidate_pairs(index.units, touched):
         if u1.rel == u2.rel and not (u1.end_line < u2.line or u2.end_line < u1.line):
             continue  # nested inside the same span
@@ -1057,22 +1281,108 @@ def component_patterns(index, touched=None):
         key = (a.rel, a.line, b.rel, b.line)
         if key in seen_pairs:
             continue
-        score, _ = _score_pair(a, b)
-        if score < MIN_COMP_SCORE:
+        threshold = _pair_threshold(a, b)
+        if threshold is None:
+            continue
+        score, detail = _score_pair(a, b)
+        shell_cues = a.raw_shell_cues & b.raw_shell_cues & SHELL_CUES
+        shell_hit = len(shell_cues) >= 2 and max(score, detail.get("behaviour_score", 0.0)) >= MIN_SHELL_SCORE
+        # Same role, different behaviour: two search inputs (debounce vs Enter) with the same markup are one
+        # component with optional props even when their handler code differs.
+        role_hit = (bool(a.raw_shell_cues & b.raw_shell_cues & {"search_input"}) and detail.get("tag", 0) >= 0.75
+                    and (not (a.classes and b.classes) or detail.get("class", 0) >= 0.6) and score >= MIN_ROLE_SCORE)
+        # Small presentational copies (empty states) are defined by their chrome: identical classes and markup.
+        chrome_hit = (detail.get("class", 0) >= 0.9 and detail.get("tag", 0) >= 0.7 and score >= MIN_CHROME_SCORE)
+        if score < threshold and (role_hit or chrome_hit) and not shell_hit:
+            threshold = score
+        # Shared design-system classes alone (same input styles in a login form and a newsletter form) do not make
+        # two components one: the code shape must agree too, unless a role/chrome/shell cue explains the match.
+        if detail.get("shingle", 1.0) < MIN_PLAIN_SHINGLE and not (role_hit or chrome_hit or shell_hit or detail.get("subset")):
+            continue
+        if score < threshold and not shell_hit:
             continue
         seen_pairs.add(key)
-        index.end[(a.rel, a.line)] = max(index.end.get((a.rel, a.line), a.line), a.end_line)
-        index.end[(b.rel, b.line)] = max(index.end.get((b.rel, b.line), b.line), b.end_line)
+        for u in (a, b):
+            index.end[(u.rel, u.line)] = max(index.end.get((u.rel, u.line), u.line), u.end_line)
+        if score < threshold:  # reported only for the shell it re-implements: cluster all such units
+            shell_groups.append((a, b, score))
+            continue
         shared_desc, varies_desc = _param_diff(a, b)
-        is_shell = bool((a.raw_shell_cues & b.raw_shell_cues) & {"overlay_backdrop", "modal_chrome", "escape_keydown"})
-        kind = "component_shell" if is_shell else "component"
         pct = int(round(score * 100))
-        label = f'{a.name} / {b.name}" ({pct}% structural match; shared: {shared_desc}; varies: {varies_desc})'
+        if detail.get("subset"):
+            big = b if detail["subset"] == a.name else a
+            label = (f'{detail["subset"]} / {big.name}" (subset variant: {pct}% of {detail["subset"]} is inside '
+                     f'{big.name}; varies: {varies_desc}; add the extras as optional props)')
+        elif detail.get("style_variant"):
+            label = (f'{a.name} / {b.name}" ({pct}% structural match, restyled copy; shared: {shared_desc}; '
+                     f'varies: styles -> one component with a `variant`/`className` prop)')
+        else:
+            label = f'{a.name} / {b.name}" ({pct}% structural match; shared: {shared_desc}; varies: {varies_desc})'
         where = ((a.rel, a.line), (b.rel, b.line))
-        # Stable content signature for shown deduplication
-        sig = f"{a.name}|{b.name}|{shared_desc}|{varies_desc}"
-        out.append((kind, label, where, sig))
+        sig = f"{a.name}|{b.name}|{shared_desc}|{varies_desc}"  # stable content signature for shown deduplication
+        kind = "component_shell" if shell_cues else "component"
+        if detail.get("subset") or detail.get("style_variant"):
+            out.append((kind, label, where, sig))
+        else:
+            plain.append((a, b, score, (kind, label, where, sig)))
+
+    # Families: 3+ components that are all copies of one another become ONE finding instead of N*(N-1)/2 pairs.
+    # Only near-identical pairs (>= MIN_FAMILY_SCORE) chain into a family, so 75% look-alikes never snowball.
+    family_pairs = [(a, b) for a, b, sc, _ in plain if sc >= MIN_FAMILY_SCORE]
+    in_family = {k for members in _clusters(family_pairs) if len(members) >= 3 for k in ((u.rel, u.line) for u in members)}
+    out.extend(f for a, b, _, f in plain if not ((a.rel, a.line) in in_family and (b.rel, b.line) in in_family))
+    for members in _clusters(family_pairs):
+        if len(members) < 3:
+            continue
+        keys = {(u.rel, u.line) for u in members}
+        scores = [sc for a, b, sc, _ in plain if (a.rel, a.line) in keys and (b.rel, b.line) in keys and sc >= MIN_FAMILY_SCORE]
+        kind = "component_shell" if any(f[0] == "component_shell" for a, _, _, f in plain if (a.rel, a.line) in keys) else "component"
+        shared_desc, varies_desc = _param_diff(members[0], members[1])
+        names = " / ".join(u.name for u in members[:4]) + (f" (+{len(members) - 4})" if len(members) > 4 else "")
+        label = (f'{names}" ({len(members)} near-identical components, {int(round(min(scores) * 100))}%+ structural match; '
+                 f'shared: {shared_desc}; varies: {varies_desc})')
+        out.append((kind, label, tuple((u.rel, u.line) for u in members), "family|" + "|".join(u.name for u in members)))
+
+    # Shell clusters: N units that each re-implement the same overlay/Escape/chrome become ONE finding.
+    for members in _clusters([(a, b) for a, b, _ in shell_groups]):
+        cues = (set.intersection(*(u.raw_shell_cues for u in members)) & SHELL_CUES
+                or set.union(*(u.raw_shell_cues for u in members)) & SHELL_CUES)
+        hooks = sorted(set.intersection(*(u.behav for u in members)) - {"useState"})
+        names = " / ".join(u.name for u in members[:4]) + (f" (+{len(members) - 4})" if len(members) > 4 else "")
+        shared = "shell: " + ", ".join(sorted(cues)) + (("; hooks/events: " + ", ".join(hooks[:4])) if hooks else "")
+        label = (f'{names}" ({len(members)} components re-implement the same shell; shared: {shared}; '
+                 f'varies: body -> extract <{_shell_name(members)} title footer onClose>{{children}}</...> '
+                 f'+ useEscapeKey, keep each body as children)')
+        where = tuple((u.rel, u.line) for u in members)
+        out.append(("component_shell", label, where, "shell|" + "|".join(u.name for u in members)))
     return out
+
+
+def _clusters(pairs):
+    """Connected components (union-find) over unit pairs, each sorted by (rel, line)."""
+    parent, units = {}, {}
+    def find(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+    for a, b in pairs:
+        ka, kb = (a.rel, a.line), (b.rel, b.line)
+        units[ka], units[kb] = a, b
+        parent[find(ka)] = find(kb)
+    groups = defaultdict(list)
+    for k, u in units.items():
+        groups[find(k)].append(u)
+    return [sorted(g, key=lambda u: (u.rel, u.line)) for g in sorted(groups.values(), key=lambda g: min((u.rel, u.line) for u in g))]
+
+
+def _shell_name(members):
+    roles = {u.role_suffix for u in members if u.role_suffix}
+    for role in ("dialog", "modal", "drawer", "sheet", "popover", "panel"):
+        if role in roles:
+            return role.capitalize() + "Shell"
+    return "ModalShell"
 
 
 def created_reuse_candidates(index, created_rels, existing_findings):
@@ -1097,7 +1407,7 @@ def created_reuse_candidates(index, created_rels, existing_findings):
             ou_in_shared = (ou_layer is not None and ou_layer <= shared_max) or bool(UI_DIR_HINT.search(ou.rel))
             shared_raw_shell = nu.raw_shell_cues & ou.raw_shell_cues
             hit_score = score >= MIN_CREATED_SCORE
-            hit_shell = bool(shared_raw_shell) and ou_in_shared
+            hit_shell = len(shared_raw_shell & SHELL_CUES) >= 2 or (bool(shared_raw_shell) and ou_in_shared)
             if hit_score or hit_shell:
                 rank = (score, len(shared_raw_shell))
                 if best is None or rank > best[0]:
@@ -1111,7 +1421,11 @@ def created_reuse_candidates(index, created_rels, existing_findings):
                 f'new component "{nu.name} -> {ou.name}" closely matches {ou.rel}:{ou.line} '
                 f'({reason}; shared: {shared_desc}; varies: {varies_desc})'
             )
-            fix = f"reuse or extend {ou.rel}:{ou.line} (<=3 optional props/slots) instead of duplicating, or --accept if distinct"
+            if score >= MIN_CREATED_SCORE:
+                fix = f"reuse or extend {ou.rel}:{ou.line} (<=3 optional props/slots) instead of duplicating, or --accept if distinct"
+            else:  # only the shell is shared: compose, do not grow one component with mode flags
+                fix = (f"extract the shared shell of {ou.rel}:{ou.line} (<{_shell_name([nu, ou])} title footer onClose>"
+                       f"{{children}} + useEscapeKey) and keep each body as children, or --accept if distinct")
             f = Finding(nu.rel, nu.line, "pattern", problem, fix)
             f.where = ((nu.rel, nu.line), (ou.rel, ou.line))
             f.code = f"reuse|{nu.name}|{ou.name}|{ou.rel}"
@@ -1131,7 +1445,9 @@ def _build_findings(index, repo, arch, touched=None):
         if not mine:
             continue
         files = sorted({r for r, _ in where})
-        force_ui = kind in ("helper", "component", "component_shell")
+        is_hook = kind == "component" and label.startswith("use") and all(
+            n.strip().startswith("use") for n in label.split('"')[0].split(" (")[0].split(" / "))
+        force_ui = kind in ("helper", "component", "component_shell") and not is_hook
         target, conflict = destination(where, code, arch, force_ui=force_ui)
         places = ", ".join(f"{r}:{n}" for r, n in where[:6]) + (f" (+{len(where) - 6})" if len(where) > 6 else "")
         if kind == "chain":
@@ -1148,6 +1464,9 @@ def _build_findings(index, repo, arch, touched=None):
         elif kind == "component_shell":
             dest = target or "the shared UI layer"
             fix = f"extract shared shell/hook to {dest} (composition, <=3 props) or unify if same role"
+        elif is_hook:
+            dest = target or "the shared hooks/lib layer"
+            fix = f"unify into one shared hook in {dest} with the varying parts as parameters (<=3)"
         elif kind == "component":
             dest = target or "the shared UI layer"
             fix = f"unify into shared component in {dest} via optional prop/callback (<=3 props)"
@@ -1712,6 +2031,37 @@ def selftest(record=False):
         for p in problems:
             print(f"FAIL    {p}")
     return 1 if differs or problems else 0
+
+
+def _semantic_selftest():
+    """cases/semantic/<case>/ are fake repositories of conceptual duplication (modal shells, restyled or subset
+    variants, hooks, wrapped components, GPUI views) and look-alike negatives; expected.txt says what must
+    (+) or must not (-, 0) be reported."""
+    return run_case_spec(CASES / "semantic", "semantic", lambda repo: [
+        str(f) for f in findings(repo, Architecture(repo)) if "near-duplicate" in f.problem])
+
+
+def run_case_spec(base, label, scan):
+    """<base>/expected.txt lines: `<case> + <text>` (a finding of <base>/<case> contains it), `<case> - <text>`
+    (none does), `<case> 0` (no finding at all). scan(repo) -> finding lines. Returns the problems."""
+    spec = base / "expected.txt"
+    if not spec.is_file():
+        return []
+    problems, cache = [], {}
+    for raw in spec.read_text(encoding="utf-8").splitlines():
+        if not raw.strip() or raw.startswith("#"):
+            continue
+        case, op, text = (raw.split(" ", 2) + [""])[:3]
+        if case not in cache:
+            cache[case] = scan(base / case)
+        got = cache[case]
+        if op == "+" and not any(text in g for g in got):
+            problems.append(f"{label} case {case}: expected a finding with {text!r}, got {got!r}")
+        elif op == "-" and any(text in g for g in got):
+            problems.append(f"{label} case {case}: unexpected finding with {text!r}")
+        elif op == "0" and got:
+            problems.append(f"{label} case {case}: expected no finding, got {got!r}")
+    return problems
 
 
 def hook_selftest():
