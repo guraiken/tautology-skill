@@ -3910,6 +3910,10 @@ def main():
     parser.add_argument("--check-image", help="verify PNG screenshot is non-blank and measure visual density")
     parser.add_argument("--compare", nargs=2, metavar=("BEFORE_PNG", "AFTER_PNG"),
                         help="compare before/after UI PNG captures by region and visual density")
+    parser.add_argument("--dpr", type=float, default=1.0,
+                        help="device pixel ratio for --check-image/--compare pixel thresholds (default 1.0)")
+    parser.add_argument("--viewport-height", type=int, default=None,
+                        help="viewport fold height in capture px for long full-page captures")
     parser.add_argument("--diff", action="store_true", help="changed UI lines against HEAD")
     parser.add_argument("--all", action="store_true", help="scan the whole file, not only changed lines")
     parser.add_argument("--only", help="comma-separated checks: " + ", ".join(sorted(CHECKS)))
@@ -3923,11 +3927,13 @@ def main():
     if args.selftest:
         return selftest()
     if args.check_image:
-        info = visual_check.inspect_image(args.check_image)
+        info = visual_check.inspect_image(args.check_image, dpr=args.dpr, viewport_h=args.viewport_height)
         print(visual_check.format_inspect(args.check_image, info))
         return 0 if info["ok"] else 1
     if args.compare:
-        res = visual_check.compare_images(args.compare[0], args.compare[1])
+        res = visual_check.compare_images(
+            args.compare[0], args.compare[1], dpr=args.dpr, viewport_h=args.viewport_height
+        )
         print(visual_check.format_compare(res))
         return 0 if res["ok"] else 1
     if args.states:

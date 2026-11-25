@@ -5,14 +5,45 @@ Read when screenshots exist or are captured during `/tautology-debloat-design`. 
 ## 0. Run Telemetry First
 
 ```
-python <skill dir>/design_audit.py --check-image <shot>
-python <skill dir>/design_audit.py --compare <before> <after>
+python <skill dir>/design_audit.py --check-image <shot> [--dpr 2] [--viewport-height 900]
+python <skill dir>/design_audit.py --compare <before> <after> [--dpr 2]
 ```
 
-Use the telemetry (`edge density`, `spatial std`, `empty tiles`, `accent islands`, and `before -> after` size/region diff) as anchors — they are non-blocking diagnostics, not pass/fail verdicts:
-- High `edge density` -> suspect nested borders, card cages, dividers, or text/badge noise.
-- High `spatial std` + many `empty tiles` -> suspect dead whitespace voids next to cramped clusters.
-- Multiple `accent islands` -> suspect competing primary CTAs, rainbow pills, or neon AI-slop.
+Use the telemetry as anchors — non-blocking diagnostics, not pass/fail verdicts. `FAIL ... no UI structure` means the capture is blank, a bare gradient or flat colour bands: recapture before auditing. Every `WARN` line (skeleton/loading capture, JPEG, transparent background, DPR mismatch) limits what the numbers mean. Pass `--dpr 2` on Retina/2x screenshots so pixel-size thresholds (hit targets, drift, nesting) scale to CSS pixels.
+
+Metrics are computed on a box-filtered copy about 480 px wide, with perceptual (CIE L*) thresholds, so light and dark themes read alike:
+- `edge density` / `spatial std` / `empty tiles`: clutter and its balance. `busiest tiles` give pixel boxes to cite. On long full-page captures (`height > 1.5x` nominal viewport height, or `--viewport-height`), `viewport bands` report per-fold telemetry and fold-scoped busiest tiles.
+- `accent islands (N hues)`: solid chromatic blobs, split by 30° hue bucket; `accent blobs` list their boxes. Subpixel text fringes no longer count.
+- `solid controls (max M in one row)`: flat filled shapes sized like buttons (`26–72` CSS px tall), of any colour including neutral black/white primaries. `M >= 2` in one row suggests competing filled CTAs.
+- `gradient/halo %`: smooth luminance or isoluminant hue ramps away from any edge (gradient heroes, glows, soft shadows).
+- `low-contrast edges % (<3:1)`: WCAG ratio measured on full-resolution pixels around each edge. Hairline borders count too, so dividers and nested cards raise it. Faded text shows as a high value with a *low* edge density.
+- `surface nesting depth`: box-inside-box container nesting (`>= 80x56` CSS px, both bordered and borderless tonal surfaces). Depth `> 2` prints the `deepest nested surface` box.
+- `left rails` / `left-edge drift`: stacked vertically disjoint blocks drifting `3–14` CSS px off a shared left rail (deliberate `>= 16px` indentation starts a new rail; centered stacks are excluded).
+- `hit targets`: exact full-resolution check for solid controls `< 32` CSS px tall (`small targets`) and adjacent same-row targets separated by `< 6` CSS px (`crowded targets`). Solid pill badges `< 32px` also count here — Pass 1 verifies whether they are clickable controls or decorative chips.
+
+Calibration (reproducible via `python <skill dir>/visual_fixtures.py --calibrate`; synthetic 1440x900 light + dark set; noise floor: ignore |Δ edge| < 0.5 pp and |Δ %| < 3 pp; deltas are valid only for the same viewport, DPR, theme and PNG):
+
+| capture | edge % | isl/hues | ctrl row | grad % | <3:1 % | fg % | nest | drift | small/crowd |
+|---|---|---|---|---|---|---|---|---|---|
+| clean | 9.8 | 0/0 | 1 | 0.0 | 6.9 | 7.7 | 0 | 0 | 0/0 |
+| competing_ctas_hued | 10.2 | 3/3 | 3 | 0.0 | 6.6 | 8.6 | 0 | 0 | 0/0 |
+| competing_ctas_neutral | 10.2 | 0/0 | 3 | 0.0 | 6.6 | 8.6 | 0 | 0 | 0/0 |
+| outline_badge_soup | 10.9 | 0/0 | 1 | 0.0 | 6.1 | 8.4 | 0 | 0 | 0/0 |
+| solid_badge_soup | 10.9 | 7/3 | 1 | 0.0 | 6.1–8.6 | 9.2 | 0 | 0 | 7/0 |
+| gradient_hero | 9.8 | 2–3/2–3 | 1 | 16.7–17.5 | 8.1–18.5 | 31.9–32.0 | 1 | 0 | 0/0 |
+| kpi_stat_strip | 12.5 | 0/0 | 1 | 0.3 | 15.0 | 19.3 | 1 | 0 | 0/0 |
+| ai_slop_dashboard | 16.8–17.6 | 14/6 | 3 | 7.4 | 50.3–55.9 | 44.8–44.9 | 3 | 0 | 10/0 |
+| divider_spam_nested_cards | 19.4 | 0/0 | 1 | 0.0 | 61.4 | 11.8 | 3 | 0 | 0/0 |
+| tonal_nesting | 3.9–4.3 | 0/0 | 1 | 7.5–10.4 | 57.2–60.7 | 51.5–52.0 | 3 | 0 | 0/0 |
+| faded_low_contrast_text | 7.7–8.6 | 0/0 | 1 | 0.0 | 95.5–96.0 | 6.8 | 0 | 0 | 0/0 |
+| dead_void | 0.8 | 0/0 | 1 | 0.0 | 0.0 | 0.9 | 0 | 0 | 0/0 |
+| cramped_hit_targets | 10.1 | 2/1 | 2 | 0.0 | 6.6 | 8.4 | 0 | 0 | 2/2 |
+| misaligned_left_edges | 7.7 | 0/0 | 1 | 0.0 | 8.7 | 6.3 | 0 | 6 (10px) | 0/0 |
+| fullpage_long (1440x2700) | 8.8 | 5–6/3–4 | 3 | 11.9–15.0 | 23.5–28.5 | 27.9–28.0 | 1 | 0 | 0/0 |
+
+Edge, islands, controls, fg, nesting, drift and hit-target counts agree tightly between light and dark themes. `<3:1 %` and `gradient %` still vary by theme palette, so compare them only within one theme.
+
+Clipping, text/icon overlap and icon-to-text baseline misalignment leave the numbers almost unchanged: only Pass 1 below finds them. In `--compare`, read the `WARN` lines first: "edge density fell but low-contrast edges rose" means the screen looks calmer because the text faded, not because the clutter went; nesting, hit-target and left-edge regressions warn automatically too. When removing or inserting a section shifts lower content vertically, `--compare` aligns horizontal reflow bands (`reflow bands: y=... dy=...`) so unchanged shifted sections are not reported as changed regions. Captures differing by an integer DPR are normalised (`normalised 2x -> 1x`).
 
 ## Pass 1 — Objective Visual Defects
 
