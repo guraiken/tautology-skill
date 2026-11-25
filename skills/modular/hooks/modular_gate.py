@@ -93,17 +93,17 @@ def _arch_destinations(repo):
         path = Path(repo) / folder / "modular" / "architecture.md"
         if not path.is_file():
             continue
-        dests = {}
+        dests = []  # (layer, target): several `target N:` lines may share a layer (one per stack)
         try:
             for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if raw.lstrip().startswith("#"):
                     continue
                 m = re.match(r"^\s*target\s+(\d+)\s*:\s*(.*)$", raw, re.IGNORECASE)
                 if m and m.group(2).strip():
-                    dests[int(m.group(1))] = m.group(2).strip()
+                    dests.append((int(m.group(1)), m.group(2).strip()))
         except OSError:
             return []
-        return [dests[k] for k in sorted(dests)]
+        return list(dict.fromkeys(t for _, t in sorted(dests, key=lambda d: d[0])))
     return []
 
 

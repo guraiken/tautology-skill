@@ -68,7 +68,9 @@ project. One key per line:
 `layer N: path prefixes`, `target N: where to extract`, `ui_layer: N` (optional explicit UI target layer),
 `exclude:`, `components:`, `idioms:`, `verify:`, `source:`, `features:` (feature roots, e.g. `src/features/`;
 default: any `features/`, `modules/` or `domains/` folder), `forbid: <from prefixes> -> <to prefixes>`.
-Lower layer numbers are more basic: layer N may import layers <= N only.
+Lower layer numbers are more basic: layer N may import layers <= N only. A repository with several stacks
+(e.g. `node/` and `react/`) may repeat `layer N:` and `target N:` once per stack: each extraction goes to the
+target sharing the longest leading path with the places it comes from.
 
 - Visual pieces go to `ui_layer` (if specified), else the lowest `target N` whose path or layer overlaps
   `components:` / `components/` / `ui/` / `widgets/` (falling back to lowest `target >= 3`).

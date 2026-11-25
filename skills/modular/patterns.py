@@ -118,6 +118,7 @@ class Architecture:
         self.components, self.common, self.verify, self.source = [], set(COMMON), "", ""
         self.ui_layer = None
         self.features, self.forbid = [], []  # feature roots; (from prefix, to prefix) dependency bans
+        self.targets = {}  # layer -> every `target N:` value (a monorepo with node/ and react/ has one per stack)
         agents_map = self.repo / ".agents" / "modular" / "architecture.md"
         self.file = agents_map if agents_map.is_file() else self.repo / MAP_FILE
         self.docs = []
@@ -137,7 +138,9 @@ class Architecture:
             if layer:
                 self.layers += [(prefix, int(layer.group(1))) for prefix in value.split()]
             elif target:
-                self.destinations[int(target.group(1))] = value
+                n = int(target.group(1))
+                self.destinations.setdefault(n, value)  # first target of the layer (compatibility)
+                self.targets.setdefault(n, []).append(value)  # every target: one per stack
             elif key in ("ui_layer", "ui layer") and value.isdigit():
                 self.ui_layer = int(value)
             elif key == "exclude":
@@ -166,15 +169,38 @@ class Architecture:
         if self.ui_layer is not None and self.ui_layer in self.destinations:
             return self.ui_layer
         for n in sorted(self.destinations):
-            dest = self.destinations[n]
+            dests = self.targets.get(n, [self.destinations[n]])
             layer_prefixes = [p for p, ln in self.layers if ln == n]
-            if any(dest.startswith(c) or c.startswith(dest) for c in self.components):
+            if any(d.startswith(c) or c.startswith(d) for d in dests for c in self.components):
                 return n
             if any(p.startswith(c) or c.startswith(p) for p in layer_prefixes for c in self.components):
                 return n
-            if UI_DIR_HINT.search(dest) or any(UI_DIR_HINT.search(p) for p in layer_prefixes):
+            if any(UI_DIR_HINT.search(d) for d in dests) or any(UI_DIR_HINT.search(p) for p in layer_prefixes):
                 return n
         return min((n for n in self.destinations if n >= 3), default=None)
+
+    def target(self, n, files=()):
+        """The `target n:` for these files: with several (one per stack), the one sharing the longest
+        leading path with them, so node/ code goes to node/utils/ and react/ code to react/utils/."""
+        options = self.targets.get(n) or ([self.destinations[n]] if n in self.destinations else [])
+        if len(options) <= 1:
+            return options[0] if options else ""
+
+        def shared(dest):
+            dparts = dest.strip("/").split("/")
+            best = 0
+            for rel in files:
+                k = 0
+                for a, b in zip(dparts, rel.split("/")):
+                    if a != b:
+                        break
+                    k += 1
+                best = max(best, k)
+            return best
+        return max(options, key=lambda d: (shared(d), -options.index(d)))
+
+    def all_targets(self):
+        return list(dict.fromkeys(t for n in sorted(self.targets) for t in self.targets[n]))
 
     def layer(self, rel):
         return next((n for prefix, n in self.layers if rel == prefix or rel.startswith(prefix)), None)
@@ -1068,19 +1094,19 @@ def destination(where, code, arch, force_ui=False):
     layers = {arch.layer(rel) for rel in files} - {None}
     ui = force_ui or is_ui_code(code, files)
     if not layers:
-        return arch.destinations.get(max(arch.destinations), ""), None
+        return arch.target(max(arch.destinations), files), None
     low = min(layers)
     visual = arch.visual_layer()
     if ui:
         if visual is None or low < visual:
             return None, (f"uses UI and appears in layer {low}, which cannot import layer "
                           f"{visual}: split off the part without UI first")
-        return arch.destinations[visual], None
+        return arch.target(visual, files), None
     non_ui = [n for n in arch.destinations if n <= low and (visual is None or n < visual)]
     if non_ui:
-        return arch.destinations[max(non_ui)], None
+        return arch.target(max(non_ui), files), None
     target = max((n for n in arch.destinations if n <= low), default=min(arch.destinations))
-    return arch.destinations[target], None
+    return arch.target(target, files), None
 
 
 def helper_patterns(index, existing):
@@ -1582,7 +1608,7 @@ def briefing(found, arch, trigger, created=()):
     """The text the hook returns to the agent: what to extract, where to, and how without changing behaviour."""
     lines = [f"Modularization (skill modular, {(HERE / 'SKILL.md').as_posix()}). Trigger: {trigger}."]
     if created:
-        where = ", ".join(arch.destinations.values()) if arch.defined else "components/, scripts/, bin/, lib/ or utils/"
+        where = ", ".join(arch.all_targets()) if arch.defined else "components/, scripts/, bin/, lib/ or utils/"
         lines.append(
             f"New component/script started ({', '.join(created[:4])}): check whether an equivalent "
             f"component, shell, helper or script already exists in ({where}); reuse, extend (<=3 optional props/slots), "
@@ -2106,6 +2132,7 @@ def selftest(record=False):
     target, conflict = destination([("src/screens/a/view.rs", 10), ("src/screens/b/view.rs", 10)], ui_block, arch)
     if conflict or target != arch.destinations.get(3):
         problems.append(f"GPUI widget block routed to {target!r} (conflict={conflict!r}), expected layer 3 {arch.destinations.get(3)!r}")
+    problems += _two_stack_selftest()
     if problems:
         for p in problems:
             print(f"FAIL    {p}")
@@ -2141,6 +2168,44 @@ def run_case_spec(base, label, scan):
         elif op == "0" and got:
             problems.append(f"{label} case {case}: expected no finding, got {got!r}")
     return problems
+
+
+def _two_stack_selftest():
+    """Two stacks (node/ and react/) share layer numbers: each `target 1:` keeps its own stack, the
+    hook's reminder lists both, and neither overwrites the other."""
+    import shutil
+    import tempfile
+    repo = Path(tempfile.mkdtemp(prefix="modular-stacks-"))
+    problems = []
+    try:
+        (repo / MAP_FILE).parent.mkdir(parents=True)
+        (repo / MAP_FILE).write_text(
+            "layer 1: app/node/utils/\nlayer 2: app/node/services/\nlayer 3: app/node/resolvers/\n"
+            "layer 1: app/react/utils/ app/react/hooks/\nlayer 3: app/react/components/\n"
+            "target 1: app/node/utils/\ntarget 1: app/react/utils/\ntarget 3: app/react/components/\n",
+            encoding="utf-8")
+        arch = Architecture(repo)
+        block = "const total = items.reduce((sum, item) => sum + item.rating, 0)"
+        for where, want in (([("app/node/services/a.ts", 3), ("app/node/resolvers/b.ts", 9)], "app/node/utils/"),
+                            ([("app/react/components/A/x.tsx", 3), ("app/react/hooks/y.ts", 9)], "app/react/utils/")):
+            got, conflict = destination(where, block, arch)
+            if got != want or conflict:
+                problems.append(f"two stacks: {where[0][0]} routed to {got!r} (conflict={conflict!r}), expected {want!r}")
+        gate = _load_module("modular_gate_stacks", HERE / "hooks" / "modular_gate.py")
+        listed = gate._arch_destinations(repo)
+        if listed != ["app/node/utils/", "app/react/utils/", "app/react/components/"]:
+            problems.append(f"two stacks: hook reminder lists {listed!r}")
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+    return problems
+
+
+def _load_module(name, path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _boundary_hook_selftest():
