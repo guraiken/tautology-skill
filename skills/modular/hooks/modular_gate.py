@@ -260,6 +260,7 @@ def stop_report(repo, session, state, gate, files=None):
     arch = patterns.Architecture(repo)
     refactor = flag.exists()
     touched, triggers, created = {}, [], []
+    edited_code = {}  # every edited code file: its changed import lines are checked against the boundaries
     for path in file_paths:
         if not path.is_file() or not path.resolve().is_relative_to(repo):
             continue
@@ -272,6 +273,7 @@ def stop_report(repo, session, state, gate, files=None):
         changed = None if new or not snap.is_file() else gate.new_lines(snap, path)
         if changed == set():
             continue  # edited and undone
+        edited_code[rel] = changed
         if arch.is_component(rel):
             touched[rel] = changed
             triggers.append(f"new component {rel}" if new else f"changed component {rel}")
@@ -289,11 +291,16 @@ def stop_report(repo, session, state, gate, files=None):
         elif refactor:
             touched[rel] = changed
             triggers.append(f"refactor in {rel}")
-    if not touched:
+    if not edited_code:
         return None
     os.chdir(repo)
-    suffixes = _expand_suffixes({Path(rel).suffix.lower() for rel in touched})
-    found, reuse_candidates = patterns.findings_and_reuse(repo, arch, touched, suffixes, created=created)
+    if touched:
+        suffixes = _expand_suffixes({Path(rel).suffix.lower() for rel in touched})
+        found, reuse_candidates = patterns.findings_and_reuse(repo, arch, touched, suffixes, created=created,
+                                                              boundary_touched=edited_code)
+    else:
+        found, reuse_candidates = patterns.boundary_findings(repo, arch, edited_code), []
+        triggers.append("imports changed in " + ", ".join(list(edited_code)[:3]))
     combined = found + reuse_candidates
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
     keyed = [(_shown_key(f), f) for f in combined]

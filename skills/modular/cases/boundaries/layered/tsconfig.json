@@ -1,0 +1,8 @@
+{
+  // aliases (comments and trailing commas are allowed in tsconfig)
+  "compilerOptions": {
+    "baseUrl": ".",
+    /* the app alias */
+    "paths": { "@/*": ["./src/*"], },
+  },
+}

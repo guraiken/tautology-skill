@@ -93,6 +93,7 @@ STYLE = re.compile(r"\.(absolute|relative|top_\w+|left_\w+|right_\w+|bottom_\w+|
                    r"border\w*|bg|shadow\w*|opacity|cursor_\w+|text_\w+|font_\w+|line_height|flex\w*|items_\w+|"
                    r"justify_\w+|gap\w*|p[xytblr]?|m[xytblr]?|w_\w+|h_\w+|overflow_\w+)\(")
 COMPONENT = re.compile(r"(^|/)(components?|screens?|views?|pages?|widgets?|ui)/|\.(tsx|jsx|vue|svelte)$")
+FEATURE_ROOT_SEGS = {"features", "modules", "domains"}
 UI_DIR_HINT = re.compile(r"(^|/)(components?|widgets?|ui|design|kit)/")
 
 
@@ -116,6 +117,7 @@ class Architecture:
         self.repo, self.layers, self.destinations, self.outside = Path(repo), [], {}, []
         self.components, self.common, self.verify, self.source = [], set(COMMON), "", ""
         self.ui_layer = None
+        self.features, self.forbid = [], []  # feature roots; (from prefix, to prefix) dependency bans
         agents_map = self.repo / ".agents" / "modular" / "architecture.md"
         self.file = agents_map if agents_map.is_file() else self.repo / MAP_FILE
         self.docs = []
@@ -142,6 +144,11 @@ class Architecture:
                 self.outside += value.split()
             elif key == "components":
                 self.components += value.split()
+            elif key == "features":
+                self.features += [p.rstrip("/") + "/" for p in value.split()]
+            elif key == "forbid" and "->" in value:
+                left, right = (s.strip() for s in value.split("->", 1))
+                self.forbid += [(a, b) for a in left.split() for b in right.split()]
             elif key == "idioms":
                 self.common |= set(value.split())
             elif key == "verify":
@@ -177,6 +184,21 @@ class Architecture:
 
     def is_component(self, rel):
         return any(rel.startswith(p) for p in self.components) or bool(COMPONENT.search(rel))
+
+    def feature_of(self, rel):
+        """The feature folder a file belongs to (`features:` roots of the map, else a folder named
+        features/, modules/ or domains/), as "<root>/<name>"; None outside any feature."""
+        for root in self.features:
+            if rel.startswith(root):
+                rest = rel[len(root):].split("/")
+                return root + rest[0] if len(rest) > 1 else None
+        if self.features:
+            return None
+        parts = rel.split("/")
+        for i, seg in enumerate(parts[:-2]):
+            if seg in FEATURE_ROOT_SEGS:
+                return "/".join(parts[:i + 2])
+        return None
 
 
 def _own_modular_case(repo, rel):
@@ -1472,6 +1494,10 @@ def _build_findings(index, repo, arch, touched=None):
             fix = f"unify into shared component in {dest} via optional prop/callback (<=3 props)"
         else:
             fix = f"extract to {target}" if target else "extract to the destination the chosen architecture gives"
+        features = sorted({arch.feature_of(r) for r in files} - {None})
+        if len(features) >= 2 and kind != "chain":
+            fix += (f"; spans features {', '.join(features[:3])}: unify only if they change for the same reason, "
+                    "else keep them apart (--accept)")
         # Canonical path/line (`where[0]`) ensures cross-file --accept and prune_accepted stay stable
         # regardless of which file in `where` triggered the scan.
         canon_path, canon_line = where[0][0], where[0][1]
@@ -1481,10 +1507,43 @@ def _build_findings(index, repo, arch, touched=None):
     return out
 
 
-def findings_and_reuse(repo, arch, touched=None, suffixes=None, created=()):
-    """Returns (findings, reuse_candidates) in one index pass for Stop hooks."""
+def _boundaries():
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import boundaries  # noqa: E402  (imports this module back: loaded lazily)
+    return boundaries
+
+
+def _taken(repo):
+    if core.SELFTEST:
+        return set()
+    return {(p, r, s) for p, r, s, *_ in core.load_accepted(core.project_subdir(repo, "modular") / "accepted.txt")}
+
+
+def boundary_findings(repo, arch, touched=None):
+    """Imports that break the layers, reach past a feature's public index, or close a module cycle
+    (boundaries.py), minus the accepted ones."""
+    taken = _taken(repo)
+    return [f for f in _safe_boundaries(repo, arch, touched) if (f.path, f.rule, f.subject) not in taken]
+
+
+def _safe_boundaries(repo, arch, touched):
+    """A broken boundary scan must not take the duplicate-code findings (or the whole Stop hook) down with it."""
+    try:
+        return _boundaries().findings(repo, arch, touched)
+    except Exception as error:  # noqa: BLE001
+        if core.SELFTEST:
+            raise
+        print(f"modular boundaries: {error}", file=sys.stderr)
+        return []
+
+
+def findings_and_reuse(repo, arch, touched=None, suffixes=None, created=(), boundary_touched=None):
+    """Returns (findings, reuse_candidates) in one index pass for Stop hooks. Boundary findings come from
+    the imports of boundary_touched (default: touched)."""
     index = Index(repo, arch, suffixes)
     raw = _build_findings(index, repo, arch, touched=touched)
+    raw += _safe_boundaries(repo, arch, touched if boundary_touched is None else boundary_touched)
     reuse = created_reuse_candidates(index, created, raw)
     all_raw = raw + reuse
     store = core.project_subdir(repo, "modular") / "accepted.txt"
@@ -1521,6 +1580,12 @@ def briefing(found, arch, trigger, created=()):
             lines.append(f"Architecture docs exist ({', '.join(arch.docs)}), but {MAP_FILE.as_posix()} is missing; follow the existing structure.")
         elif any("same file" not in f.fix for f in found[:PER_ROUND]):
             lines.append("No architecture map: follow the existing folder structure (or extract locally inside the same file).")
+    bounds = [f for f in found[:PER_ROUND] if f.kind == "boundary"]
+    if bounds:
+        lines.append("Imports that break the module boundaries (fix the dependency direction; do not extract):")
+        lines += [f"- {f}" for f in bounds]
+        lines.append("A deliberate dependency? Accept it silently: " + core.accept_command(HERE / "patterns.py") + ".")
+    found = [f for f in found if f.kind != "boundary"]
     if found:
         lines.append("Repeated or near-duplicate patterns involving this session's files:")
         for n, f in enumerate(found[:PER_ROUND], 1):
@@ -2020,7 +2085,8 @@ def selftest(record=False):
     if record:
         return core.compare_expected(got, CASES / "expected.txt", record=True)
     differs = core.compare_expected(got, CASES / "expected.txt")
-    problems = hook_selftest() + _wave1_wave2_selftest()
+    problems = hook_selftest() + _wave1_wave2_selftest() + _semantic_selftest()
+    problems += _boundaries().selftest() + _boundary_hook_selftest()
     # Regression: blocks using GPUI context/widget helpers (cx.entity, kit::, on_change) route to UI layer 3, not layer 2.
     arch = Architecture(repo)
     ui_block = "let owner = cx.entity().downgrade();\nkit::switch(\"id\", enabled, p).hint(\"tip\", p).on_change(move |v, _, _, cx| {});"
@@ -2061,6 +2127,46 @@ def run_case_spec(base, label, scan):
             problems.append(f"{label} case {case}: unexpected finding with {text!r}")
         elif op == "0" and got:
             problems.append(f"{label} case {case}: expected no finding, got {got!r}")
+    return problems
+
+
+def _boundary_hook_selftest():
+    """Stop hook on a lib file (not a component): an edit away from its bad imports stays quiet, a new
+    file importing a higher layer is reported once."""
+    import json
+    import shutil
+    import tempfile
+    gates = HERE.parent / "tautology" / "hooks"
+    problems = []
+    repo = Path(tempfile.mkdtemp(prefix="modular-bounds-"))
+    try:
+        shutil.copytree(CASES / "boundaries" / "layered", repo, dirs_exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(repo)}
+
+        def hook(script, event, **extra):
+            payload = {"hook_event_name": event, "session_id": "bounds", "cwd": str(repo), **extra}
+            run = subprocess.run([sys.executable, str(gates / script)], input=json.dumps(payload),
+                                 capture_output=True, text=True, encoding="utf-8", env=env, cwd=repo)
+            return run.returncode, run.stderr
+
+        old = repo / "src" / "lib" / "format.ts"
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(old)})
+        old.write_text(old.read_text(encoding="utf-8") + "export const SEP = \" | \";\n", encoding="utf-8")
+        code, report = hook("stop_gate.py", "Stop")
+        if code != 0 or "boundaries" in report:
+            problems.append(f"boundary hook: an edit away from old imports reported (exit {code}): {report[:200]!r}")
+        new = repo / "src" / "lib" / "date.ts"
+        hook("edit_gate.py", "PreToolUse", tool_input={"file_path": str(new)})
+        new.write_text('import { pageTitle } from "../pages/Home";\nexport const today = () => pageTitle;\n', encoding="utf-8")
+        code, report = hook("stop_gate.py", "Stop")
+        if code != 2 or 'layer 1 imports "src/pages/Home.tsx"' not in report or "module boundaries" not in report:
+            problems.append(f"boundary hook: new upward import not reported (exit {code}): {report[:300]!r}")
+        code, _ = hook("stop_gate.py", "Stop")
+        if code != 0:
+            problems.append(f"boundary hook: repeated Stop exited {code}, expected 0")
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
     return problems
 
 

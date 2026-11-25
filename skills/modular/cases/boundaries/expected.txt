@@ -1,0 +1,18 @@
+# <case> + <text>: a finding contains it; <case> - <text>: none does; <case> 0: no finding at all
+layered + layer 1 imports "src/pages/Home.tsx" from layer 3
+layered + layer 1 imports "src/pages/types.ts" from layer 3
+layered + which the map forbids (src/components/ -> src/api/)
+layered + module cycle "src/components -> src/lib -> src/pages -> src/components"
+layered - layer 2 imports
+layered - react
+features + src/features/orders/OrderList.tsx:1 [boundary] reaches into "src/features/billing/internal/calc.ts" past the public API of src/features/billing
+features + src/pages/Checkout.tsx:1 [boundary] reaches into "src/features/billing/internal/calc.ts"
+features + shared code imports "src/features/orders/index.ts" from feature/page code
+features + module cycle "src/features/billing -> src/features/orders -> src/features/billing"
+features - src/features/users
+features - "src/features/billing/index.ts" past
+pyapp + app/domain/models.py:1 [boundary] shared code imports "app/screens/main.py"
+pyapp + module cycle "app/c -> app/d -> app/c"
+pyapp - app/x
+pyapp - app/y
+plain 0
