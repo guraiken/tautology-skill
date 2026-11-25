@@ -15,4 +15,11 @@ pyapp + app/domain/models.py:1 [boundary] shared code imports "app/screens/main.
 pyapp + module cycle "app/c -> app/d -> app/c"
 pyapp - app/x
 pyapp - app/y
+pybackend + backend/app/domain/models.py:1 [boundary] shared code imports "backend/app/screens/main.py"
+pybackend - backend/core/service.py
+monorepo + packages/web/src/lib/format.ts:1 [boundary] shared code imports "packages/web/src/app/page.tsx"
+monorepo + packages/web/src/app/page.tsx:1 [boundary] reaches into "packages/web/src/features/billing/internal/tax.ts" past the public API of packages/web/src/features/billing
+monorepo - packages/web/src/lib/format.ts:3
+monorepo - packages/shared/src/core.ts
+monorepo - packages/app/src/lib/util.ts
 plain 0

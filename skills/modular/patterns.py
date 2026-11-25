@@ -2360,6 +2360,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("files", nargs="*")
     parser.add_argument("--all", action="store_true", help="the whole repository")
+    parser.add_argument("--suggest-map", action="store_true", help="draft .claude/modular/architecture.md from the import graph")
     parser.add_argument("--accept", help="finding line (or '-' to read from stdin) that is not a repetition to extract")
     parser.add_argument("--reason", default="")
     parser.add_argument("--selftest", action="store_true")
@@ -2369,6 +2370,9 @@ def main():
         return core.accept(args.accept, args.reason, store=core.project_subdir(core.REPO, "modular") / "accepted.txt", tool="patterns.py")
     if args.selftest:
         return selftest(record=args.record)
+    if args.suggest_map:
+        print(_boundaries().suggest_map(core.REPO), end="")
+        return 0
     if not args.all and not args.files:
         parser.print_help()
         return 2

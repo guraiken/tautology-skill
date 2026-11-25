@@ -79,7 +79,8 @@ Without the map:
 - if the codebase describes its architecture (`ARCHITECTURE.md`, or a layers section in `AGENTS`/`CLAUDE`/`README`),
   follow that structure (and write `.claude/modular/architecture.md` citing `source:` when helpful);
 - otherwise follow the existing folder structure (`components/` + `lib/` or `utils/`, feature `shared/`,
-  or a local function inside the same file).
+  or a local function inside the same file) — or run `python <skill>/boundaries.py --suggest-map` to
+  draft `.claude/modular/architecture.md` from the current import graph.
 
 ## The hook
 
@@ -112,6 +113,7 @@ python <skill>/patterns.py <files_or_dirs>   # patterns that touch these files o
 python <skill>/patterns.py --all
 python <skill>/patterns.py --selftest        # cases/repo vs cases/expected.txt, hooks, Wave 1/2 and boundary tests
 python <skill>/boundaries.py --all           # only the module-boundary findings (also part of patterns.py)
+python <skill>/boundaries.py --suggest-map   # draft .claude/modular/architecture.md from the current import graph
 ```
 
 ## Install
