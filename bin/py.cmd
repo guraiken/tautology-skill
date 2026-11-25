@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal
 REM Runs a hook script with the first Python 3.10+ found on Windows. TAUTOLOGY_PYTHON overrides the search.
 REM No Python: the hook does nothing (exit 0), so it never blocks an edit, a prompt or an answer.

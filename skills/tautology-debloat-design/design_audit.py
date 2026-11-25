@@ -43,7 +43,7 @@ JSX_LIKE = core.JSX | MARKUP_EXT
 WEB_EXT = core.JS | MARKUP_EXT
 CODE_EXT = core.CODE | MARKUP_EXT
 SCAN_EXT = CODE_EXT | STYLE_EXT
-normalize_jsx_tags = getattr(core, "normalize_jsx_tags", spacing.normalize_jsx_tags)
+normalize_jsx_tags = core.normalize_jsx_tags
 DEFAULT_THEME_RE = re.compile(r"(^|/)(?:theme|tokens|palette|colors)(?:/|\.)", re.I)
 GENERIC_UI_DIRS = {"screens", "views", "pages", "components", "dialogs", "modals", "ui", "src"}
 SCREEN_SUBDIRS = {"view", "views", "ui", "dialogs", "modals", "detail"}
@@ -722,8 +722,13 @@ def _extract_imported_icons(source):
 
 
 def _is_tw_pill(line):
-    """Detects Tailwind inline pills (rounded-full + text-xs/10-12px + non-transparent bg- in any order)."""
-    return "rounded-full" in line and bool(TW_PILL_TEXT_RE.search(line)) and bool(TW_PILL_BG_RE.search(line))
+    """Detects Tailwind inline pills (rounded-full + text-xs/10-12px + non-transparent bg- in any order),
+    excluding interactive pill buttons/links."""
+    if not ("rounded-full" in line and TW_PILL_TEXT_RE.search(line) and TW_PILL_BG_RE.search(line)):
+        return False
+    if re.search(r"<(?:button|a)\b", line, re.I) and not re.search(r"<(?:span|div|p|small|label|li)\b[^>]*rounded-full", line, re.I):
+        return False
+    return True
 
 
 def _is_tw_animated_dot(line, context):
@@ -1104,7 +1109,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
             if pad is not None:
                 if len(card_lines) > prev_cards or number in card_lines:
                     card_paddings.append((len(stack), pad, number))
-                elif stack and stack[-1][1] in card_lines:
+                elif suffix == ".rs" and stack and stack[-1][1] in card_lines and raw.lstrip().startswith(".") and ".child" not in raw:
                     card_paddings.append((len(stack), pad, stack[-1][1]))
 
         if opened_branch:
@@ -1273,13 +1278,13 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False,
                 f"{name}: inconsistent typography scale ({len(font_sizes)} distinct font sizes: {sample})",
                 "limit a single view to 3-4 typography scale steps from the theme",
             ))
-        by_depth = defaultdict(list)
+        by_depth = defaultdict(dict)
         for depth, pad, ln in stats["card_paddings"]:
-            by_depth[depth].append((pad, ln))
-        for entries in by_depth.values():
-            pads = sorted({p for p, _ in entries})
-            if len(entries) >= 2 and len(pads) >= 2 and pads[-1] - pads[0] >= 8.0 and any(look(ln) for _, ln in entries):
-                first_ln = min(ln for _, ln in entries)
+            by_depth[depth].setdefault(ln, pad)
+        for card_map in by_depth.values():
+            pads = sorted(set(card_map.values()))
+            if len(card_map) >= 2 and len(pads) >= 2 and pads[-1] - pads[0] >= 8.0 and any(look(ln) for ln in card_map):
+                first_ln = min(card_map)
                 pad_desc = ", ".join(f"{p:g}px" for p in pads[:4])
                 out.append(core.Finding(
                     rel, first_ln, "design",
@@ -1448,9 +1453,11 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
         )
         if any("inner boxed card inside a modal" in f.problem for f in out[before_len:]):
             local_modal_card_fns.add(stats["name"])
-    # Include lean status-dot and decorative-badge rules (deduped by key) so design_audit is the single [design] owner.
+    # Include lean nested-cards, status-dot, and decorative-badge rules (deduped by key) so design_audit is the single [design] owner.
     seen_keys = {f.key() for f in out}
     lean_extra = []
+    if suffix in JSX_LIKE:
+        _lean_nested_cards(rel, lines, look, skip, lean_extra)
     _lean_slop_badges(rel, lines, suffix, look, skip, test_from, lean_extra)
     _lean_gpui_status_dots(rel, lines, suffix, look, skip, test_from, lean_extra)
     for f in lean_extra:
@@ -1780,8 +1787,27 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out, source
                         QSS_FIX,
                     ))
     if sfc_style_lines is not None:
+        sfc_comment = False
+        sfc_theme_depth = 0
         for number, raw in enumerate(sfc_style_lines, 1):
-            if raw.strip() and number not in skip and look(number) and not CSS_VAR_DECL_RE.match(raw):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            if sfc_comment:
+                if "*/" in stripped:
+                    sfc_comment = False
+                continue
+            if stripped.startswith("/*"):
+                if "*/" not in stripped[2:]:
+                    sfc_comment = True
+                continue
+            if CSS_SCOPE_RE.match(stripped) and "{" in stripped:
+                sfc_theme_depth += stripped.count("{") - stripped.count("}")
+                continue
+            if sfc_theme_depth > 0:
+                sfc_theme_depth = max(0, sfc_theme_depth + stripped.count("{") - stripped.count("}"))
+                continue
+            if number not in skip and look(number) and not CSS_VAR_DECL_RE.match(raw):
                 _check_css_line(rel, number, raw, tokens, out)
 
 
@@ -2013,7 +2039,7 @@ def scan_lean_design(path, rel, text, repo, only=None):
     test_from = core.rust_test_start(raw_lines) if suffix == ".rs" else None
     norm_lines = normalize_jsx_tags(raw_lines) if suffix in WEB_EXT else raw_lines
     eff_look = spacing._absorbed_look(raw_lines, norm_lines, base_look) if suffix in WEB_EXT else base_look
-    lines = copy_rules.jsx_lines(norm_lines) if suffix in JSX_LIKE else norm_lines
+    lines = core.jsx_lines(norm_lines, normalized=True) if suffix in JSX_LIKE else norm_lines
     fallback = path.stem
     is_modal_file = bool(MODAL_CALLEE_RE.search(rel))
 
@@ -2088,7 +2114,7 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None, include
     tokens = tokens or discover_project_tokens()
     raw_lines = source.splitlines()
     norm_lines = normalize_jsx_tags(raw_lines) if suffix in WEB_EXT else raw_lines
-    lines = copy_rules.jsx_lines(norm_lines) if suffix in JSX_LIKE else norm_lines
+    lines = core.jsx_lines(norm_lines, normalized=True) if suffix in JSX_LIKE else norm_lines
     skip = core.ignored_lines(raw_lines)
     base_look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
     look = spacing._absorbed_look(raw_lines, norm_lines, base_look) if suffix in WEB_EXT else base_look

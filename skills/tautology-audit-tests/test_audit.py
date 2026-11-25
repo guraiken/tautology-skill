@@ -84,7 +84,7 @@ def _norm_clone_line(raw, suffix):
     return s
 
 
-def _block_end_brace(lines, open_line, suffix):
+def _block_end_brace(lines, open_line, suffix, start_col=0):
     """Finds the closing line of a braced Rust/JS test block using string-stripped code."""
     depth = 0
     started = False
@@ -94,7 +94,8 @@ def _block_end_brace(lines, open_line, suffix):
             continue
         code = core.strip_literals(raw)
         code = re.sub(r"//.*$", "", code)
-        for ch in code:
+        segment = code[start_col:] if idx == open_line - 1 and start_col else code
+        for ch in segment:
             if ch == "{":
                 depth += 1
                 started = True
@@ -171,10 +172,38 @@ def _extract_test_blocks(lines, suffix, is_test_file, test_from):
                 continue
             me = re.match(r"""^\s*(?:it|test)\.each\s*\(""", line)
             if me:
-                end = _block_end_brace(lines, number, suffix)
-                span_hdr = " ".join(lines[number - 1:min(len(lines), number + 10)])
+                span_hdr = " ".join(lines[number - 1:min(len(lines), number + 15)])
                 tm = re.search(r"""\)\s*\(\s*["'`]([^"'`]+)["'`]""", span_hdr)
-                blocks.append(TestBlock(tm.group(1) if tm else f"each@{number}", number, end, number + 1, False, False))
+                cb_line, cb_col = number, 0
+                seen_call, seen_fn, paren_depth = False, False, 0
+                found_cb = False
+                for ln in range(number, min(len(lines), number + 16) + 1):
+                    code = re.sub(r"//.*$", "", core.strip_literals(lines[ln - 1]))
+                    col, n_code = 0, len(code)
+                    while col < n_code:
+                        ch = code[col]
+                        if not seen_call:
+                            if ch == "(":
+                                paren_depth += 1
+                            elif ch == ")":
+                                paren_depth -= 1
+                                if paren_depth == 0:
+                                    seen_call = True
+                        elif not seen_fn:
+                            if ch == "=" and col + 1 < n_code and code[col + 1] == ">":
+                                seen_fn = True
+                                col += 1
+                            elif code[col:col + 8] == "function" and (col == 0 or not code[col - 1].isalnum()):
+                                seen_fn = True
+                                col += 7
+                        elif ch == "{":
+                            cb_line, cb_col, found_cb = ln, col, True
+                            break
+                        col += 1
+                    if found_cb:
+                        break
+                end = _block_end_brace(lines, cb_line, suffix, start_col=cb_col)
+                blocks.append(TestBlock(tm.group(1) if tm else f"each@{number}", number, end, cb_line + 1, False, False))
     return blocks
 
 

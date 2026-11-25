@@ -4,7 +4,11 @@
 # The name found is cached: probing spawns each candidate, and on Windows `python3` is a slow Store stub.
 check='import sys; sys.exit(sys.version_info < (3, 10))'
 if [ -n "$TAUTOLOGY_PYTHON" ]; then
-  if "$TAUTOLOGY_PYTHON" -c "$check" >/dev/null 2>&1; then
+  if [ "$TAUTOLOGY_PYTHON" = "py -3" ]; then
+    if command -v py >/dev/null 2>&1 && py -3 -c "$check" >/dev/null 2>&1; then
+      exec py -3 "$@"
+    fi
+  elif "$TAUTOLOGY_PYTHON" -c "$check" >/dev/null 2>&1; then
     exec "$TAUTOLOGY_PYTHON" "$@"
   fi
   echo "tautology plugin: TAUTOLOGY_PYTHON is not Python 3.10+; probing PATH" >&2
@@ -14,13 +18,13 @@ if [ -r "$cache" ]; then
   read -r cached < "$cache"
   case "$cached" in
     python3|python)
-      if command -v "$cached" >/dev/null 2>&1 && "$cached" -c "$check" >/dev/null 2>&1; then
+      if command -v "$cached" >/dev/null 2>&1; then
         exec "$cached" "$@"
       fi
       rm -f "$cache" 2>/dev/null
       ;;
     py)
-      if command -v py >/dev/null 2>&1 && py -3 -c "$check" >/dev/null 2>&1; then
+      if command -v py >/dev/null 2>&1; then
         exec py -3 "$@"
       fi
       rm -f "$cache" 2>/dev/null

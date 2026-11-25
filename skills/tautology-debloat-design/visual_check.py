@@ -215,19 +215,6 @@ def read_image(path):
     return _decode_os(src)
 
 
-def _blend_pixel(r, g, b, a, matte=ALPHA_MATTE):
-    if a >= 255:
-        return r, g, b
-    if a <= 0:
-        return matte
-    inv = 255 - a
-    return (
-        (r * a + matte[0] * inv) // 255,
-        (g * a + matte[1] * inv) // 255,
-        (b * a + matte[2] * inv) // 255,
-    )
-
-
 def _composite_rows(width, height, channels, rows, matte=ALPHA_MATTE):
     """Returns 3-channel RGB rows with any RGBA alpha composited over an opaque neutral matte."""
     if channels == 3:

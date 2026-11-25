@@ -379,14 +379,14 @@ TIC_PROBLEM = re.compile(
     r"tooltip or info icon|cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards|"
     r"competing primary accents|stacked filter controls|exposed filter/sort dropdowns|"
     r"fixed-width filter/sort trigger|inner boxed card inside a modal|overloaded hierarchy|"
-    r"composed hierarchy|decorative glassmorphism|gradient text|pill soup|pulsing status"
+    r"composed hierarchy|decorative (?:gradient/)?glassmorphism|gradient text|pill soup|pulsing status"
 )
 DESIGN_LAYOUT_PROBLEM = re.compile(
     r"cards nested|decorative badges|decorative status dot|dividers/separators|badges/chips|"
     r"info_hint badges|boxed cards|competing primary accents|stacked filter controls|"
     r"exposed filter/sort dropdowns|fixed-width filter/sort trigger|inner boxed card inside a modal|"
     r"overloaded hierarchy|composed hierarchy|explicit spacer boxes|stacked text blocks|"
-    r"repeated inline style pattern|decorative glassmorphism|gradient text|pill soup|pulsing status|"
+    r"repeated inline style pattern|decorative (?:gradient/)?glassmorphism|gradient text|pill soup|pulsing status|"
     r"competing HEADLINE"
 )
 TICS = []  # paths with a tic reported in this hook run (hunt and design audit share this module)
@@ -475,7 +475,7 @@ def accepted(finding):
 
 FINDING_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+) \[(?P<kind>[^\]]+)\] (?P<problem>.+?)(?: -> .*)?$")
 QUOTED_FINDING_RE = re.compile(
-    r"^(?:block of |chain |local UI helper |pleonasm |doubled word |new UI text |"
+    r"^(?:block of |chain |local UI helper |near-duplicate component |new component |pleonasm |doubled word |new UI text |"
     r"comment restates the code: |title ends with a period: |tooltip of ~|"
     r"sentence said \d+x: |same idea twice: |passage repeated in different paragraphs: |"
     r"hardcoded (?:(?:CSS |inline (?:CSS |QSS )?)?color literal|inline (?:CSS |QSS )?color|Tailwind (?:arbitrary color|font-size|radius)) |"
@@ -773,39 +773,42 @@ _JSX_OPEN_TAG = re.compile(r"<([A-Za-z][\w.-]*)(?=[\s/>]|$)")
 _JSX_BEFORE_OK = re.compile(r"(?:^|[\s(\[{=,:?>&|!;]|\b(?:return|case|yield|await))$")
 
 
+def _step_comment_str(text, i, in_str, in_block, escape, allow_str=True):
+    """Advances one step through JS/JSX comment or string state.
+    Returns (action, next_i, in_str, in_block, escape) where action is 'continue', 'eol', or 'code'."""
+    n = len(text)
+    ch = text[i]
+    if in_block:
+        if ch == "*" and i + 1 < n and text[i + 1] == "/":
+            return "continue", i + 2, in_str, False, escape
+        return "continue", i + 1, in_str, True, escape
+    if in_str:
+        if escape:
+            return "continue", i + 1, in_str, False, False
+        if ch == "\\":
+            return "continue", i + 1, in_str, False, True
+        if ch == in_str:
+            return "continue", i + 1, None, False, False
+        return "continue", i + 1, in_str, False, False
+    if ch == "/" and i + 1 < n:
+        if text[i + 1] == "/":
+            return "eol", i, None, False, False
+        if text[i + 1] == "*":
+            return "continue", i + 2, None, True, False
+    if allow_str and ch in "\"'`":
+        return "continue", i + 1, ch, False, False
+    return "code", i, None, False, False
+
+
 def _strip_line_comment(line, in_block=False):
     """Strips a trailing // comment outside quotes and block comments; returns (cleaned, in_block)."""
     in_str, escape, i, n = None, False, 0, len(line)
     while i < n:
-        ch = line[i]
-        if in_block:
-            if ch == "*" and i + 1 < n and line[i + 1] == "/":
-                in_block = False
-                i += 2
-                continue
+        action, i, in_str, in_block, escape = _step_comment_str(line, i, in_str, in_block, escape)
+        if action == "eol":
+            return line[:i].rstrip(), False
+        if action == "code":
             i += 1
-            continue
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == in_str:
-                in_str = None
-            i += 1
-            continue
-        if ch in "\"'`":
-            in_str = ch
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n:
-            if line[i + 1] == "/":
-                return line[:i].rstrip(), False
-            if line[i + 1] == "*":
-                in_block = True
-                i += 2
-                continue
-        i += 1
     return line, in_block
 
 
@@ -814,34 +817,14 @@ def _scan_jsx_open_state(line):
     tag_open, in_str, in_block, brace_depth, escape = False, None, False, 0, False
     i, n = 0, len(line)
     while i < n:
+        action, i, in_str, in_block, escape = _step_comment_str(
+            line, i, in_str, in_block, escape, allow_str=(tag_open or brace_depth > 0),
+        )
+        if action == "eol":
+            break
+        if action == "continue":
+            continue
         ch = line[i]
-        if in_block:
-            if ch == "*" and i + 1 < n and line[i + 1] == "/":
-                in_block = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == in_str:
-                in_str = None
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n:
-            if line[i + 1] == "/":
-                break
-            if line[i + 1] == "*":
-                in_block = True
-                i += 2
-                continue
-        if ch in "\"'`":
-            in_str = ch
-            i += 1
-            continue
         if tag_open:
             if ch == "{":
                 brace_depth += 1
@@ -889,34 +872,12 @@ def normalize_jsx_tags(lines):
             k, m_len = 0, len(cur)
             found_close = None
             while k < m_len:
+                action, k, in_str, in_block, escape = _step_comment_str(cur, k, in_str, in_block, escape)
+                if action == "eol":
+                    break
+                if action == "continue":
+                    continue
                 ch = cur[k]
-                if in_block:
-                    if ch == "*" and k + 1 < m_len and cur[k + 1] == "/":
-                        in_block = False
-                        k += 2
-                        continue
-                    k += 1
-                    continue
-                if in_str:
-                    if escape:
-                        escape = False
-                    elif ch == "\\":
-                        escape = True
-                    elif ch == in_str:
-                        in_str = None
-                    k += 1
-                    continue
-                if ch == "/" and k + 1 < m_len:
-                    if cur[k + 1] == "/":
-                        break
-                    if cur[k + 1] == "*":
-                        in_block = True
-                        k += 2
-                        continue
-                if ch in "\"'`":
-                    in_str = ch
-                    k += 1
-                    continue
                 if ch == "{":
                     brace_depth += 1
                 elif ch == "}" and brace_depth > 0:
@@ -997,9 +958,9 @@ def _jsx_text_sub(match):
     return '>{"' + escaped + '"}<'
 
 
-def jsx_lines(lines):
+def jsx_lines(lines, normalized=False):
     """JSX: normalizes multi-line opening tags and turns bare text between tags into quoted literals."""
-    out = normalize_jsx_tags(lines)
+    out = list(lines) if normalized else normalize_jsx_tags(lines)
     for i, line in enumerate(out):
         if not line:
             continue

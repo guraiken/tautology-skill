@@ -221,7 +221,7 @@ _JS_TOKENS_KEEP_CLASS = re.compile(
 _RS_TOKENS = re.compile(
     r"(?P<bc>/\*[\s\S]*?\*/)"
     r"|(?P<lc>//[^\n]*)"
-    r'|(?P<raw>r(#*)"[\s\S]*?"\2)'
+    r'|(?P<raw>r(?P<hashes>#*)"[\s\S]*?"(?P=hashes))'
     r"|(?P<ch>'(?:[^'\\\n]|\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.))')"
     r'|(?P<dq>"(?:[^"\\\n]|\\[\s\S])*")'
 )
@@ -513,14 +513,19 @@ def _fingerprint_unit(rel, line, end_line, name, lang, is_exported, body, params
     # Channel 1: role-preserving normalized 3-token shingles
     # Keep semantic string literals (Escape, Enter, keydown, search, dialog) while blanking arbitrary text and classes.
     no_comments = blank_strings(body, suffix, preserve_class=False)
-    # Restore semantic literals from original body for shingle/behav fidelity by doing targeted clean on body:
-    cleaned = re.sub(r'/\*[\s\S]*?\*/|//[^\n]*', " ", body) if lang != "py" else re.sub(r"#[^\n]*", " ", body)
-    if lang == "js":
-        cleaned = CLASS_ATTR_RE.sub("className=CLS", cleaned)
-    def _keep_sem_str(m):
-        val = m.group(0)[1:-1]
-        return val if val in SEMANTIC_STRINGS else "STR"
-    cleaned = re.sub(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`[^`\n]*`', _keep_sem_str, cleaned)
+    def _clean_tok(m):
+        g = m.lastgroup
+        if g in ("jxc", "bc", "hc", "lc"):
+            return " "
+        if g == "cls":
+            return "className=CLS"
+        if g in ("dq", "sq", "tpl", "raw", "tq"):
+            s = m.group(0)
+            val = s[3:-3] if g == "tq" else (s[s.find('"') + 1:s.rfind('"')] if g == "raw" else s[1:-1])
+            return val if val in SEMANTIC_STRINGS else "STR"
+        return "STR"
+    tok_re = _JS_TOKENS_KEEP_CLASS if lang == "js" else (_RS_TOKENS if lang == "rs" else _PY_TOKENS)
+    cleaned = tok_re.sub(_clean_tok, body)
     raw_toks = re.findall(r"[A-Za-z_]\w*|\d+|[{}()<>=\[\].,;?!&|]+", cleaned)
     own_props_types = {name, f"{name}Props"}
     norm_toks = []
@@ -1062,7 +1067,7 @@ def component_patterns(index, touched=None):
         is_shell = bool((a.raw_shell_cues & b.raw_shell_cues) & {"overlay_backdrop", "modal_chrome", "escape_keydown"})
         kind = "component_shell" if is_shell else "component"
         pct = int(round(score * 100))
-        label = f'{a.name}" / "{b.name}" ({pct}% structural match; shared: {shared_desc}; varies: {varies_desc})'
+        label = f'{a.name} / {b.name}" ({pct}% structural match; shared: {shared_desc}; varies: {varies_desc})'
         where = ((a.rel, a.line), (b.rel, b.line))
         # Stable content signature for shown deduplication
         sig = f"{a.name}|{b.name}|{shared_desc}|{varies_desc}"
@@ -1103,7 +1108,7 @@ def created_reuse_candidates(index, created_rels, existing_findings):
             reason = (f"{int(round(score * 100))}% structural match" if score >= MIN_CREATED_SCORE
                       else f"duplicates shared shell ({', '.join(sorted(shared_raw_shell))})")
             problem = (
-                f'new component "{nu.name}" closely matches existing "{ou.name}" in {ou.rel}:{ou.line} '
+                f'new component "{nu.name} -> {ou.name}" closely matches {ou.rel}:{ou.line} '
                 f'({reason}; shared: {shared_desc}; varies: {varies_desc})'
             )
             fix = f"reuse or extend {ou.rel}:{ou.line} (<=3 optional props/slots) instead of duplicating, or --accept if distinct"

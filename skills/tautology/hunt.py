@@ -103,11 +103,12 @@ def raw_scan_file(path, only=None, include_bloat=True, include_design=True):
         return []
     source = path.read_text(encoding="utf-8", errors="replace")
     raw_lines = source.splitlines()
+    raw_only = only
     lines = raw_lines
     if suffix in JSX:
         norm = normalize_jsx_tags(raw_lines)
         only = _expand_only_for_jsx(raw_lines, norm, only)
-        lines = jsx_lines(norm)
+        lines = jsx_lines(norm, normalized=True)
     skip = ignored_lines(raw_lines)
     look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
     out = []
@@ -181,9 +182,7 @@ def raw_scan_file(path, only=None, include_bloat=True, include_design=True):
         clutter_checks(rel, lines, suffix, look, skip, test_from, out,
                        include_layout_design=include_design and lean_design is None)
         if lean_design is not None:
-            for finding in lean_design(path, rel, source, core.REPO):
-                if look(finding.line):
-                    out.append(finding)
+            out.extend(lean_design(path, rel, source, core.REPO, only=raw_only))
     if suffix == ".rs" and (test or test_from):
         rust_test_checks(rel, lines, 1 if test else test_from, look, out)
     if suffix == ".py":

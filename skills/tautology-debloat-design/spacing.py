@@ -83,126 +83,7 @@ STYLE_TAG_RE = re.compile(r"<style\b[^>]*>([\s\S]*?)</style>", re.I)
 
 # ---------------------------------------------------------------- JSX tag normalization
 
-_JSX_TAG_START_RE = re.compile(r"<([A-Za-z_][\w.:-]*)(?=[\s/>]|$)")
-_JSX_PREV_OK = set("([{,=?:&|!>\n\r \t")
-
-
-def _local_normalize_jsx_tags(lines):
-    """Joins multi-line JSX/HTML opening tags (<Tag\\n  ...\\n>) onto their opening line,
-    replacing absorbed continuation lines with "" so 1-to-1 line numbers are preserved."""
-    n = len(lines)
-    out = list(lines)
-    i = 0
-    while i < n:
-        line = out[i]
-        if "<" not in line:
-            i += 1
-            continue
-        # Find an opening tag on this line that is NOT closed before EOL.
-        pos = 0
-        opened = False
-        while pos < len(line):
-            ch = line[pos]
-            if ch in ('"', "'", "`"):
-                q = ch
-                pos += 1
-                while pos < len(line):
-                    if line[pos] == "\\" and pos + 1 < len(line):
-                        pos += 2
-                        continue
-                    if line[pos] == q:
-                        pos += 1
-                        break
-                    pos += 1
-                continue
-            if line[pos:pos + 2] == "//":
-                break
-            if ch == "<":
-                m = _JSX_TAG_START_RE.match(line, pos)
-                if m:
-                    # Exclude TypeScript generics (e.g. `useState<Foo`, `Array<T`, `React.FC<Props`).
-                    prev_idx = pos - 1
-                    while prev_idx >= 0 and line[prev_idx] in " \t":
-                        prev_idx -= 1
-                    prev_ok = prev_idx < 0 or line[prev_idx] in _JSX_PREV_OK or line[:pos].rstrip().endswith(("return", "=>"))
-                    if prev_ok:
-                        # Scan from m.end() to see if tag closes on this line.
-                        j = m.end()
-                        braces = 0
-                        quote = None
-                        closed = False
-                        while j < len(line):
-                            c = line[j]
-                            if quote:
-                                if c == "\\" and j + 1 < len(line):
-                                    j += 2
-                                    continue
-                                if c == quote:
-                                    quote = None
-                            else:
-                                if c in ('"', "'", "`"):
-                                    quote = c
-                                elif c == "{":
-                                    braces += 1
-                                elif c == "}":
-                                    braces = max(0, braces - 1)
-                                elif c == ">" and braces == 0:
-                                    closed = True
-                                    pos = j + 1
-                                    break
-                            j += 1
-                        if closed:
-                            continue
-                        # Unclosed opening tag at EOL: scan forward up to 30 lines to find closing `>`.
-                        parts = [line]
-                        k = i + 1
-                        found_end = -1
-                        while k < n and k - i <= 30:
-                            nxt = out[k]
-                            # Strip line comments outside strings when joining
-                            j2 = 0
-                            while j2 < len(nxt):
-                                c = nxt[j2]
-                                if quote:
-                                    if c == "\\" and j2 + 1 < len(nxt):
-                                        j2 += 2
-                                        continue
-                                    if c == quote:
-                                        quote = None
-                                else:
-                                    if nxt[j2:j2 + 2] == "//":
-                                        nxt = nxt[:j2]
-                                        break
-                                    if c in ('"', "'", "`"):
-                                        quote = c
-                                    elif c == "{":
-                                        braces += 1
-                                    elif c == "}":
-                                        braces = max(0, braces - 1)
-                                    elif c == ">" and braces == 0:
-                                        found_end = k
-                                        break
-                                j2 += 1
-                            parts.append(nxt.strip())
-                            if found_end >= 0:
-                                break
-                            if braces == 0 and quote is None and nxt.rstrip().endswith(";"):
-                                break
-                            k += 1
-                        if found_end >= 0:
-                            out[i] = " ".join(p for p in parts if p)
-                            for clr in range(i + 1, found_end + 1):
-                                out[clr] = ""
-                            opened = True
-                            i = found_end + 1
-                            break
-            pos += 1
-        if not opened:
-            i += 1
-    return out
-
-
-normalize_jsx_tags = getattr(core, "normalize_jsx_tags", _local_normalize_jsx_tags)
+normalize_jsx_tags = core.normalize_jsx_tags
 
 
 def _absorbed_look(raw_lines, norm_lines, look):
@@ -217,6 +98,8 @@ def _absorbed_look(raw_lines, norm_lines, look):
                 absorbed[anchor] = [anchor]
             elif anchor is not None:
                 absorbed[anchor].append(ln)
+        elif raw_lines[idx] == "" and anchor is not None:
+            absorbed[anchor].append(ln)
         else:
             anchor = None
     if not absorbed:
@@ -260,7 +143,7 @@ def file_values(source, suffix):
     elif suffix in (core.JS | MARKUP_EXT):
         norm = normalize_jsx_tags(source.splitlines())
         for line in norm:
-            if "class" in line or "cn(" in line or "clsx(" in line:
+            if "class" in line or "cn(" in line or "clsx(" in line or "twMerge(" in line or "cva(" in line:
                 for unit, gap in TW_UNIT_RE.findall(line):
                     out.append(float(unit or gap) * 4)
                 for a_val, a_unit, g_val, g_unit in TW_ARBITRARY_RE.findall(line):
@@ -940,13 +823,16 @@ def _join_cn_calls(lines):
             continue
         depth = 0
         quote = None
+        escape = False
         closed = False
         for j in range(m.end() - 1, len(line)):
             c = line[j]
             if quote:
-                if c == "\\":
-                    continue
-                if c == quote:
+                if escape:
+                    escape = False
+                elif c == "\\":
+                    escape = True
+                elif c == quote:
                     quote = None
             else:
                 if c in ('"', "'", "`"):
@@ -966,12 +852,15 @@ def _join_cn_calls(lines):
         found_end = -1
         while k < n and k - i <= 20:
             nxt = out[k]
+            escape = False
             for j in range(len(nxt)):
                 c = nxt[j]
                 if quote:
-                    if c == "\\":
-                        continue
-                    if c == quote:
+                    if escape:
+                        escape = False
+                    elif c == "\\":
+                        escape = True
+                    elif c == quote:
                         quote = None
                 else:
                     if nxt[j:j + 2] == "//":
@@ -1007,7 +896,7 @@ def tailwind_findings(rel, lines, fn_of, look, steps, tokens):
     for number, line in enumerate(norm_lines, 1):
         if not eff_look(number):
             continue
-        if "class" not in line and "cn(" not in line and "clsx(" not in line and "twMerge(" not in line:
+        if "class" not in line and "cn(" not in line and "clsx(" not in line and "twMerge(" not in line and "cva(" not in line:
             continue
         for tag, classes in _tw_elements(line):
             is_bordered = bool(TW_BORDER_RE.search(classes))
