@@ -11,7 +11,7 @@ fn toolbar(p: Palette, active: usize) -> impl IntoElement {
     div()
         .flex()
         .items_center()
-        .gap(px(9.))
+        .gap(px(8.))
         .child(filters)
         .child(view_toggle)
         .child(kit::primary_button("add-item", p, true).child("Adicionar"))

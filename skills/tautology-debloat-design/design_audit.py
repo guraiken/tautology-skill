@@ -38,21 +38,29 @@ import visual_check  # noqa: E402
 
 CHECKS = {"design", "style", "spacing", "bloat"}
 STYLE_EXT = {".css", ".scss"}
-SCAN_EXT = core.CODE | STYLE_EXT
-DEFAULT_THEME_RE = re.compile(r"(^|/)(?:(?:theme|tokens|palette|colors)(?:/|\.)|styles?/)", re.I)
+MARKUP_EXT = {".vue", ".svelte"}
+JSX_LIKE = core.JSX | MARKUP_EXT
+WEB_EXT = core.JS | MARKUP_EXT
+CODE_EXT = core.CODE | MARKUP_EXT
+SCAN_EXT = CODE_EXT | STYLE_EXT
+normalize_jsx_tags = getattr(core, "normalize_jsx_tags", spacing.normalize_jsx_tags)
+DEFAULT_THEME_RE = re.compile(r"(^|/)(?:theme|tokens|palette|colors)(?:/|\.)", re.I)
 GENERIC_UI_DIRS = {"screens", "views", "pages", "components", "dialogs", "modals", "ui", "src"}
 SCREEN_SUBDIRS = {"view", "views", "ui", "dialogs", "modals", "detail"}
 
-# Patterns for structural UI cues across GPUI (Rust), React/HTML (JSX/TSX), and Qt (Python).
+# Patterns for structural UI cues across GPUI/egui (Rust), React/HTML/Vue/Svelte (JSX/TSX), and Qt (Python).
 STYLED_BOX_RE = re.compile(
     r"\b(?:solid_card|surface_card|form_card|modal_card|panel|card|QFrame|QGroupBox)\s*\("
+    r"|\b(?:egui::)?Frame::(?:group|window|popup|canvas|side_top_panel|central_panel)\s*\("
+    r"|\bui\.group\s*\("
     r"|<(?:Card|Paper|Panel|Box|Modal|Dialog)\b"
     r"|\.(?:bg|border_[1-9]\w*|border_color|shadow_\w+)\("
-    r"|<(?:div|section|aside|article)\b[^>]*(?:bg-|shadow|card|rounded|\bborder(?!-0\b))"
+    r"|<(?:div|section|aside|article)\b[^>]*(?:bg-(?!transparent\b)|shadow|card|rounded|\bborder(?!-(?:0|none|transparent)\b))"
 )
 CARD_CALL_RE = re.compile(
     r"\b(?:solid_card|surface_card|form_card|modal_card)\s*\("
     r"|\b(?:visual|kit|ui|theme)::card\s*\("
+    r"|\b(?:egui::)?Frame::group\s*\(|\bui\.group\s*\("
     r"|<(?:Card|Paper|Panel)\b|\.rounded\([^)]*\)\s*\.bg\("
 )
 INNER_CARD_CALL_RE = re.compile(
@@ -61,16 +69,21 @@ INNER_CARD_CALL_RE = re.compile(
 MODAL_BOX_RE = re.compile(
     r"\b(?:modal_card|modal_shell|modal_backdrop|(?:visual|kit|ui)::(?:modal|dialog))\s*\(|<(?:Modal|Dialog)\b"
 )
-HEADLINE_RE = re.compile(r"\b(?:visual|typography|theme)::HEADLINE\b|<h1\b")
+HEADLINE_RE = re.compile(r"\b(?:visual|typography|theme)::HEADLINE\b|\bui\.heading\s*\(|<h1\b")
 MICRO_RE = re.compile(
     r"\b(?:button|reveal_button|secondary_button|primary_button|close_button|icon|tag|badge|chip|switch|check_box)\s*\("
     r"|\bsize\(px\((?:[1-9]|1[0-9]|2[0-9]|3[0-6])\.?\)"
 )
 DIVIDER_RE = re.compile(
-    r"\b(?:divider|separator|row_separator)\s*\(|<hr\b|<Divider\b|QFrame[\.:]+HLine|\.h\(px\([12]\.?\)\)"
+    r"\b(?:divider|separator|row_separator)\s*\(|\bui\.separator\s*\(|<hr\b|<Divider\b|QFrame[\.:]+HLine|\.h\(px\([12]\.?\)\)"
 )
 BADGE_RE = re.compile(r"\b(?:visual::tag|tag|badge|chip|status_pill)\s*\(|<(?:Badge|Chip|Tag)\b")
 ICON_RE = re.compile(r"\b(?:visual::icon|icon)\s*\(|<(?:[A-Z]\w*Icon|Icon)\b")
+ICON_IMPORT_RE = re.compile(
+    r"""import\s*\{([^}]+)\}\s*from\s*['"](?:lucide-react|@heroicons/[^'"]+|@radix-ui/react-icons|"""
+    r"""react-icons(?:/[^'"]+)?|@?phosphor-icons(?:/[^'"]+)?|@tabler/icons-react)['"]""",
+    re.S,
+)
 INFO_HINT_RE = re.compile(r"\binfo_hint\s*\(|<(?:InfoHint|HelpTip|HintIcon)\b")
 PRIMARY_ACCENT_RE = re.compile(
     r"\bprimary_button\s*\("
@@ -100,22 +113,59 @@ FIXED_TRIGGER_WIDTH_RE = re.compile(
     r"|\bw-\[(\d+(?:\.\d*)?)px\]"
     r"|\.setFixedWidth\(\s*(\d+)\s*\)"
 )
-LOOP_START_RE = re.compile(r"^\s*(?:for\s+\w|\.for_each\s*\(|\.map\(\s*\|)")
+LOOP_START_RE = re.compile(
+    r"^\s*(?:for\s+\w|\.for_each\s*\(|\.map\(\s*\|)"
+    r"|\.\s*(?:map|flatMap)\(\s*(?:\||(?:\(?[A-Za-z_]\w*(?:\s*:\s*[^,)=]+)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*:\s*[^,)=]+)?)*\)?\s*=>))"
+    r"|\bv-for\s*=|\{#each\b"
+)
 SPACER_RE = re.compile(
-    r"\bdiv\(\)\s*\.(?:h|w)\(px\((?P<px>\d+(?:\.\d*)?)\)\)\s*(?:[,;)]|$)|<Spacer\b|\.addSpacing\("
+    r"\bdiv\(\)\s*\.(?:h|w)\(px\((?P<px>\d+(?:\.\d*)?)\)\)\s*(?:[,;)]|$)"
+    r"|\bui\.add_space\(\s*(?P<egui_px>\d+(?:\.\d*)?)\s*\)"
+    r"|<Spacer\b|\.addSpacing\("
 )
 TEXT_STACK_CALL_RE = re.compile(
     r"\.(?:child)\(\s*(?:div\(\)[^;{}]*\.text_size|\"|format!)|<(?:p|span|small|Caption|Text)\b"
 )
+TEXT_OPEN_TAG_RE = re.compile(r"<(p|span|small|Caption|Text)\b[^>]*>")
+TEXT_CLOSE_ONLY_RE = re.compile(r"^\s*</(?:p|span|small|Caption|Text)>\s*$")
 HEADER_NAME_RE = re.compile(r"(?i)header|title|heading|subtitle|intro|banner|card_head")
 FN_DECL_RE = re.compile(
     r"^\s*(?:(?:pub(?:\([^)]*\))?|export(?:\s+default)?)\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|def|function)\s+"
 )
 
+# Composite AI-slop cues & intra-screen consistency patterns.
+SLOP_GRADIENT_RE = re.compile(r"\bbg-gradient-to-|\b(?:linear|radial|conic)-gradient\(")
+SLOP_GLASS_CUES_RE = re.compile(r"\bbackdrop-blur(?:-\w+)?\b|\bshadow-(?:xl|2xl)\b")
+SLOP_FROST_BG_RE = re.compile(r"\bbg-white/(?:5|10|15|20)\b|\bring-1\s+ring-white/")
+SLOP_MODAL_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:modal|dialog|overlay|popover|tooltip|drawer|sheet|modal_backdrop)\b|fixed\s+inset-0"
+)
+SLOP_GRAD_CLIP_RE = re.compile(r"\bbg-clip-text\b")
+SLOP_GRAD_TRANS_RE = re.compile(r"\btext-transparent\b")
+TW_PILL_TEXT_RE = re.compile(r"\btext-(?:xs|\[1[012]px\])\b")
+TW_PILL_BG_RE = re.compile(r"\bbg-(?!transparent\b)[\w/\[\]#-]+")
+TW_DOT_H_RE = re.compile(r"\bh-(?:1\.5|2|2\.5)\b")
+TW_DOT_W_RE = re.compile(r"\bw-(?:1\.5|2|2\.5)\b")
+TW_DOT_SIZE_RE = re.compile(r"\bsize-(?:1\.5|2|2\.5)\b")
+TW_DOT_ANIM_RE = re.compile(r"\banimate-(?:pulse|ping)\b")
+TW_DOT_LOADING_RE = re.compile(r"(?i)\b(?:loading|isLoading|spinner|skeleton|progress|fetching|syncing|busy|pending)\b")
+
+# Intra-screen consistency extractors (full audit only).
+CONSIST_TW_RADIUS_RE = re.compile(
+    r"(?<![\w-])rounded(?:-(?:none|sm|md|lg|xl|2xl|3xl)|-\[(\d+(?:\.\d+)?)(px|rem)\])?(?![\w-])"
+)
+CONSIST_RS_RADIUS_RE = re.compile(r"\.rounded\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)|\.rounded_(sm|md|lg|xl|2xl)\(\)")
+CONSIST_TW_FONT_RE = re.compile(r"(?<![\w-])text-(xs|sm|base|lg|xl|[2-6]xl|\[(?:\d+(?:\.\d+)?)(?:px|rem)\])(?![\w-])")
+CONSIST_RS_FONT_RE = re.compile(r"\.text_size\(\s*px\(\s*([^)]+)\s*\)\s*\)|\.text_(xs|sm|base|lg|xl|2xl)\(\)")
+CONSIST_CARD_TW_PAD_RE = re.compile(r"(?<![\w-])p(?:[xy])?-(?:(\d+(?:\.5)?)|\[(\d+(?:\.\d+)?)(px|rem)\])(?![\w.\]-])")
+CONSIST_CARD_RS_PAD_RE = re.compile(r"\.(?:p|px|py)\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)|\.(?:p|px|py)_(\d+)(p5)?\(\)")
+
 # Patterns for hardcoded styling literals.
 CSS_FIX = "use CSS custom property or theme token"
 QSS_FIX = "use theme palette/QSS variables"
 RS_HEX_COLOR_RE = re.compile(r"\b(?:gpui::)?(rgb|rgba|hsla)\(\s*(0x[0-9a-fA-F_]{6,12}|[^)]+)\)")
+EGUI_COLOR_RE = re.compile(r"\b(?:egui::)?Color32::from_(?:rgb|rgba_unmultiplied|rgba_premultiplied|hex)\s*\([^)]+\)")
+EGUI_FONT_SIZE_RE = re.compile(r"\bRichText::new\([^)]*\)\s*\.size\(\s*(\d+(?:\.\d*)?)\s*\)")
 RS_RGBA_LIT_RE = re.compile(r"\bRgba\s*\{\s*(?![^}]*\.\.)[^}]*\}")
 CSS_COLOR_RE = re.compile(r"(#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\(\s*\d[^)]*\))")
 RS_FONT_SIZE_RE = re.compile(r"\.text_size\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)")
@@ -128,6 +178,7 @@ JSX_RADIUS_PX_RE = re.compile(r"\bborderRadius\s*:\s*['\"]?(\d+)")
 CSS_FONT_PX_RE = re.compile(r"\bfont-size\s*:\s*(\d+(?:\.\d*)?)\s*px")
 CSS_RADIUS_PX_RE = re.compile(r"\bborder-radius\s*:\s*(\d+(?:\.\d*)?)\s*px")
 CSS_VAR_DECL_RE = re.compile(r"^\s*--[\w-]+\s*:")
+CSS_ANY_DECL_RE = re.compile(r"^\s*[\w-]+\s*:")
 CSS_SCOPE_RE = re.compile(r"^\s*(?::root\b|@theme\b|\[data-theme\b)")
 TW_COLOR_RE = re.compile(
     r"\b(?:bg|text|border|ring|fill|stroke|from|via|to|outline|shadow|accent|decoration)-\[(#[0-9a-fA-F]{3,8}|(?:rgba?|hsla?)\([^\]\n]+\))\]"
@@ -136,17 +187,44 @@ TW_RAW_COLOR_RE = re.compile(
     r"\b(?:bg|text|border|ring|from|via|to|fill|stroke|outline|shadow)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|"
     r"yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b"
 )
+TW_SEMANTIC_COLOR_RE = re.compile(
+    r"\b(?:bg|text|border)-(?:background|foreground|card|card-foreground|surface|primary|primary-foreground|"
+    r"secondary|muted|muted-foreground|accent|destructive|border|input|ring|base|action-primary|on-base)\b"
+)
 TW_FONT_RE = re.compile(r"\btext-\[(\d+(?:\.\d+)?)(px|rem|em)\]")
 TW_RADIUS_RE = re.compile(r"\brounded(?:-[trbl]{1,2})?-\[(\d+(?:\.\d+)?)(px|rem|em)\]")
 THEME_STYLE_HINT_RE = re.compile(r"\b(?:visual::\w+|theme::\w+|\w+_radius|var\(--|tokens\.)")
 URL_HASH_RE = re.compile(r"https?://\S*#")
 
 
-def is_theme_file(rel):
-    """Theme/token definition files hold color and metric literals on purpose."""
+def _is_css_token_only_file(source):
+    """True when >50% of non-comment CSS declarations are `--*` custom properties."""
+    clean = re.sub(r"/\*[\s\S]*?\*/", "", source)
+    total = 0
+    vars_cnt = 0
+    for chunk in re.split(r"[;{}]", clean):
+        line = chunk.strip()
+        if not line or line.startswith("@") or "{" in line:
+            continue
+        if CSS_VAR_DECL_RE.match(line):
+            vars_cnt += 1
+            total += 1
+        elif CSS_ANY_DECL_RE.match(line) and not re.match(r"^[a-z-]+:\s*(?:hover|focus|active|before|after|root|not\()", line):
+            total += 1
+    return total > 0 and vars_cnt * 2 > total
+
+
+def is_theme_file(rel, source=None):
+    """Theme/token definition files hold color and metric literals on purpose.
+    Does not blindly exempt `styles/` folders; only explicit theme/token paths or CSS files
+    composed mostly (>50%) of `--*` custom property declarations."""
     if core.C.theme_paths and any(rel.startswith(p) for p in core.C.theme_paths):
         return True
-    return DEFAULT_THEME_RE.search(rel) is not None
+    if DEFAULT_THEME_RE.search(rel) is not None:
+        return True
+    if source is not None and Path(rel).suffix.lower() in STYLE_EXT:
+        return _is_css_token_only_file(source)
+    return False
 
 
 def _own_debloat_case(path, rel):
@@ -170,7 +248,9 @@ def _tracked_candidates(root=None, exts=SCAN_EXT):
 
 def _is_target_file(rel, suffix, source):
     if suffix in STYLE_EXT:
-        return not is_theme_file(rel)
+        return not is_theme_file(rel, source)
+    if suffix in MARKUP_EXT:
+        return True
     return core.is_ui(rel, source)
 
 
@@ -235,9 +315,10 @@ def _discover_kit_helpers(root=None):
 
 
 def discover_project_tokens(root=None):
-    """Detects palette, typography, radius tokens, tooltips, and kit primary-fill helpers."""
+    """Detects palette, semantic Tailwind tokens, typography, radius tokens, tooltips, and kit primary-fill helpers."""
     tokens = {
         "has_palette": bool(core.C.design.get("style_tokens")),
+        "has_tw_semantic_colors": bool(core.C.design.get("style_tokens")),
         "has_font_tokens": bool(core.C.design.get("style_tokens")),
         "has_radius_tokens": False,
         "uses_tooltips": bool(core.C.raw.get("tooltip_calls")),
@@ -252,10 +333,15 @@ def discover_project_tokens(root=None):
     general = [c for c in candidates if c not in prioritized_set]
 
     def inspect(rel, suffix, source):
-        is_theme = is_theme_file(rel) or suffix in STYLE_EXT or "tailwind.config" in Path(rel).name.lower()
+        is_tw_cfg = "tailwind.config" in Path(rel).name.lower()
+        is_theme = is_theme_file(rel, source) or suffix in STYLE_EXT or is_tw_cfg
         if (re.search(r"\bPalette\b|\bcreateTheme\b|--bg\b|--surface\b|--[\w-]*(?:color|bg|surface|accent|card)\s*:|\bp\.(surface|card|text|primary)\b|\b(?:bg|c|b--)-(?:base|action-primary|muted-[1-5]|on-base|danger|warning|success)\b", source)
                 or (is_theme and re.search(r"\bcolors\s*:", source))):
             tokens["has_palette"] = True
+        if ((is_tw_cfg and re.search(r"\bcolors\s*:", source))
+                or (suffix in STYLE_EXT and re.search(r"@theme\b[\s\S]*--color-", source))
+                or (suffix in WEB_EXT and TW_SEMANTIC_COLOR_RE.search(source))):
+            tokens["has_tw_semantic_colors"] = True
         if (re.search(r"\b(?:visual|typography)::(?:BODY|FOOTNOTE|CAPTION|EMPHASIS|HEADLINE|TITLE)\b|--[\w-]*(?:font|text)[-_]?size\b|typography\.|\btext-(?:xs|sm|base|lg|xl|2xl)\b|\bt-(?:heading-[1-6]|body|small|mini|action)\b", source)
                 or (is_theme and re.search(r"\b(?:BODY|FOOTNOTE|CAPTION|EMPHASIS|HEADLINE|TITLE|fontSize)\b", source))):
             tokens["has_font_tokens"] = True
@@ -271,11 +357,11 @@ def discover_project_tokens(root=None):
     checked = 0
     for rel, path, suffix in general:
         source = path.read_text(encoding="utf-8", errors="replace")
-        if not core.is_ui(rel, source):
+        if not _is_target_file(rel, suffix, source):
             continue
         inspect(rel, suffix, source)
         checked += 1
-        if checked >= 50 and all(tokens[k] for k in ("has_palette", "has_font_tokens", "has_radius_tokens", "uses_tooltips")):
+        if checked >= 50 and all(tokens[k] for k in ("has_palette", "has_tw_semantic_colors", "has_font_tokens", "has_radius_tokens", "uses_tooltips")):
             break
     return tokens
 
@@ -325,14 +411,24 @@ def _container_indent(line):
     return max(0, indent - 4) if stripped.startswith(".") else indent
 
 
-def _function_spans(lines, suffix, test_from):
-    """Splits UI file lines into (start_line, name, end_line) spans keyed by render_owner."""
+def _function_spans(lines, suffix, test_from, fallback_name="view"):
+    """Splits UI file lines into (start_line, name, end_line) spans keyed by render_owner
+    (and FN_HEAD_RE for export default / React.FC components, or a whole-file span for Vue/Svelte)."""
     limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(lines)
     spans = []
     current = None
     for number in range(1, limit + 1):
+        line = lines[number - 1]
         owner = copy_rules.render_owner(lines, number)
+        if suffix in WEB_EXT:
+            hm = FN_HEAD_RE.match(line)
+            if hm:
+                hname = hm.group(1) or hm.group(2)
+                if hname:
+                    owner = (number, hname)
         if owner[0] == 0:
+            if current is not None and suffix in WEB_EXT:
+                continue
             continue
         if current is None or owner != current[:2]:
             if current is not None:
@@ -340,18 +436,35 @@ def _function_spans(lines, suffix, test_from):
             current = (owner[0], owner[1])
     if current is not None:
         spans.append((current[0], current[1], limit))
+    if not spans and suffix in MARKUP_EXT and limit > 0:
+        spans.append((1, fallback_name, limit))
     return spans
 
 
 def _is_text_stack_line(lines, number, raw, suffix):
-    if TEXT_STACK_CALL_RE.search(raw) and any(len(lit.split()) >= 4 for lit in core.literals(raw, suffix)):
+    lit_suffix = ".tsx" if suffix in MARKUP_EXT else suffix
+    if TEXT_STACK_CALL_RE.search(raw) and any(len(lit.split()) >= 4 for lit in core.literals(raw, lit_suffix)):
         return True
     if raw.rstrip().endswith((".child(", ".child([")) and number < len(lines):
         nxt = lines[number]
         if ("div()" in nxt or "hint_text" in nxt or ".text_size(" in nxt) and any(
-            len(lit.split()) >= 4 for lit in core.literals(nxt, suffix)
+            len(lit.split()) >= 4 for lit in core.literals(nxt, lit_suffix)
         ):
             return True
+    # Multi-line JSX/HTML text element: `<p>\n  Several words of prose.\n</p>`
+    if suffix in WEB_EXT:
+        om = TEXT_OPEN_TAG_RE.search(raw)
+        if om and f"</{om.group(1)}>" not in raw:
+            for offset in range(1, 4):
+                if number - 1 + offset >= len(lines):
+                    break
+                nxt = lines[number - 1 + offset]
+                if f"</{om.group(1)}>" in nxt:
+                    if any(len(lit.split()) >= 4 for lit in core.literals(nxt, lit_suffix)):
+                        return True
+                    break
+                if any(len(lit.split()) >= 4 for lit in core.literals(nxt, lit_suffix)):
+                    return True
     return False
 
 
@@ -593,6 +706,94 @@ def _blank_literals(line):
     return re.sub(r"\x60[^\x60\n]*\x60", lambda m: "`" + " " * (len(m.group(0)) - 2) + "`", line)
 
 
+def _extract_imported_icons(source):
+    """Extracts component identifiers imported from common React/Vue/Svelte icon libraries."""
+    names = set()
+    for m in ICON_IMPORT_RE.finditer(source):
+        for item in m.group(1).split(","):
+            tok = item.strip()
+            if not tok:
+                continue
+            if " as " in tok:
+                tok = tok.split(" as ")[-1].strip()
+            if re.match(r"^[A-Z]\w*$", tok):
+                names.add(tok)
+    return names
+
+
+def _is_tw_pill(line):
+    """Detects Tailwind inline pills (rounded-full + text-xs/10-12px + non-transparent bg- in any order)."""
+    return "rounded-full" in line and bool(TW_PILL_TEXT_RE.search(line)) and bool(TW_PILL_BG_RE.search(line))
+
+
+def _is_tw_animated_dot(line, context):
+    """Detects Tailwind animated status dots (rounded-full + tiny 1.5/2/2.5 square + animate-pulse/ping)
+    in any class order, excluding real loading/spinner/skeleton indicators."""
+    if "rounded-full" not in line or not TW_DOT_ANIM_RE.search(line):
+        return False
+    has_size = bool(TW_DOT_SIZE_RE.search(line)) or (bool(TW_DOT_H_RE.search(line)) and bool(TW_DOT_W_RE.search(line)))
+    if not has_size:
+        return False
+    return not TW_DOT_LOADING_RE.search(context)
+
+
+def _slop_surface_cue(line, is_modal):
+    """Composite (>=2 co-occurring cues) decorative gradient/glassmorphism detector on non-modal surfaces."""
+    if is_modal or SLOP_MODAL_CONTEXT_RE.search(line):
+        return None
+    has_grad = bool(SLOP_GRADIENT_RE.search(line))
+    has_glass = bool(SLOP_GLASS_CUES_RE.search(line))
+    has_frost = bool(SLOP_FROST_BG_RE.search(line))
+    if has_grad and has_glass:
+        return "decorative gradient/glassmorphism surface"
+    if has_frost and "backdrop-blur" in line and re.search(r"\bshadow-(?:xl|2xl)\b", line):
+        return "decorative glassmorphism card (backdrop-blur + frost bg + heavy shadow)"
+    return None
+
+
+def _card_padding_px(raw, suffix):
+    """Extracts representative padding (px) from a card element line, or None if not explicit."""
+    vals = []
+    if suffix in WEB_EXT:
+        for unit, arb_v, arb_u in CONSIST_CARD_TW_PAD_RE.findall(raw):
+            if unit:
+                vals.append(float(unit) * 4.0)
+            elif arb_v:
+                vals.append(float(arb_v) * (16.0 if arb_u == "rem" else 1.0))
+    elif suffix == ".rs":
+        for px_v, unit_v, half in CONSIST_CARD_RS_PAD_RE.findall(raw):
+            if px_v:
+                vals.append(float(px_v))
+            elif unit_v:
+                vals.append(int(unit_v) * 4.0 + (2.0 if half else 0.0))
+    return max(vals) if vals else None
+
+
+def _collect_consistency(raw, suffix, number, radii, font_sizes):
+    """Collects distinct non-pill corner radii and font sizes within a single view (full audit only)."""
+    if suffix in WEB_EXT:
+        for m in CONSIST_TW_RADIUS_RE.finditer(raw):
+            tok = m.group(0)
+            if tok in ("rounded-full",) or (m.group(1) and float(m.group(1)) >= 999):
+                continue
+            radii.setdefault(tok, number)
+        for m in CONSIST_TW_FONT_RE.finditer(raw):
+            font_sizes.setdefault(f"text-{m.group(1)}", number)
+    elif suffix == ".rs":
+        for px_v, named in CONSIST_RS_RADIUS_RE.findall(raw):
+            if px_v:
+                r = float(px_v)
+                if 0 < r < 999:
+                    radii.setdefault(f"{r:g}px", number)
+            elif named:
+                radii.setdefault(f"rounded_{named}", number)
+        for arg, named in CONSIST_RS_FONT_RE.findall(raw):
+            if arg:
+                font_sizes.setdefault(arg.strip(), number)
+            elif named:
+                font_sizes.setdefault(f"text_{named}", number)
+
+
 def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, bp, number, max_depth, max_depth_line, is_decl=False, box_lines=None):
     """Tracks delimiter/JSX nesting alongside indent so single-line chains and wrappers count accurately."""
     stripped = raw.lstrip()
@@ -605,7 +806,7 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
     ):
         stack.pop()
 
-    box_text = raw if suffix in core.JSX else code
+    box_text = raw if suffix in JSX_LIKE else code
     is_micro = MICRO_RE.search(code) is not None
     box_matches = [] if (is_micro or is_decl) else list(STYLED_BOX_RE.finditer(box_text))
     tokens = []  # (pos, kind, match_obj)
@@ -616,7 +817,7 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
             tokens.append((pos, "open", None))
         elif ch in ")]":
             tokens.append((pos, "close", None))
-    if suffix in core.JSX:
+    if suffix in JSX_LIKE:
         for m in JSX_OPEN_TAG_RE.finditer(code):
             tokens.append((m.start(), "jsx_open", None))
         for m in JSX_CLOSE_TAG_RE.finditer(code):
@@ -653,9 +854,10 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
                     max_depth, max_depth_line = len(stack), number
             if stack:
                 tok = m.group(0)
-                if ".bg(" in tok or "bg-" in raw:
+                if ".bg(" in tok or re.search(r"\bbg-(?!transparent\b)", raw):
                     stack[-1][2].add("bg")
-                if re.search(r"\.(?:border_[1-9]\w*|border_color)\(|\bborder(?!-0\b)", tok) or re.search(r"\bborder-(?!0\b)", box_text):
+                if (re.search(r"\.(?:border_[1-9]\w*|border_color)\(|\bborder(?!-(?:0|none|transparent)\b)", tok)
+                        or re.search(r"\bborder-(?!(?:0|none|transparent)\b)", box_text)):
                     stack[-1][2].add("border")
                 if not in_loop and not stack[-1][3] and {"bg", "border"} <= stack[-1][2]:
                     raw_items["cards"].append((bp, stack[-1][1]))
@@ -685,7 +887,7 @@ def _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_prima
     return False
 
 
-def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, primary_helpers=(), non_primary_helpers=()):
+def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, primary_helpers=(), non_primary_helpers=(), imported_icons=(), is_modal_file=False):
     cfg = core.C.design
     stack = []  # [[(nesting, indent), line_number, flags, card_counted, is_jsx]]
     branch_stack = []  # [[indent, group_id, arm_idx, kind, has_else, has_return, cond_meta]]
@@ -699,6 +901,10 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
     header_runs, current_run, raw_calls = [], [], []
     inline_chains = defaultdict(list)
     fixed_width_triggers = []
+    slop_findings = []  # (line, problem, fix)
+    radii, font_sizes = {}, {}
+    card_paddings = []  # (depth, pad_px, line)
+    flat_filter_chips = []
     loop_indent = None
     loop_bp = ()
     loop_primary_seen = False
@@ -706,6 +912,11 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
     card_lines = set()
     box_lines = set()
     has_modal_box = False
+    imported_icon_re = (
+        re.compile(r"<(?:" + "|".join(re.escape(ic) for ic in sorted(imported_icons)) + r")\b")
+        if imported_icons else None
+    )
+    fn_modal_hint = is_modal_file or bool(MODAL_CALLEE_RE.search(name))
 
     for number in range(start, end + 1):
         if number in skip:
@@ -716,16 +927,18 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         stripped = raw.lstrip()
         indent = len(raw) - len(stripped)
 
-        if loop_indent is not None and indent <= loop_indent and stripped not in ("{", "}", ");", ")"):
+        if loop_indent is not None and indent <= loop_indent and stripped not in ("{", "}", ");", ")", "})}", ")}", ")}"):
             loop_indent = None
             loop_primary_seen = False
             loop_filter_chip_seen = False
+        started_loop = False
         if loop_indent is None and LOOP_START_RE.search(raw):
             loop_indent = indent
             loop_bp = tuple((f[1], f[2]) for f in branch_stack)
             loop_primary_seen = False
             loop_filter_chip_seen = False
-        in_loop = loop_indent is not None and indent > loop_indent
+            started_loop = True
+        in_loop = (loop_indent is not None and indent > loop_indent) or (started_loop and bool(FILTER_CHIP_RE.search(raw)))
 
         continued = _pop_closed_branches(branch_stack, confirmed, indent, stripped, suffix, raw, cond_groups)
         code = _blank_literals(raw)
@@ -748,9 +961,9 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         elif not continued and (
             re.search(r"(?:^|[\s=(])if\b[^{};]*\{\s*$", code)
             or (suffix == ".py" and re.match(r"^if\b.*:\s*$", stripped))
-            or (suffix in core.JSX and re.search(r"\{\s*[^?{}]+\?\s*\(\s*$", code))
+            or (suffix in JSX_LIKE and re.search(r"\{\s*[^?{}]+\?\s*\(\s*$", code))
         ):
-            cond_info = None if (suffix in core.JSX and "?" in code) else _branch_cond(raw, suffix)
+            cond_info = None if (suffix in JSX_LIKE and "?" in code) else _branch_cond(raw, suffix)
             active_gids = {f[1] for f in branch_stack}
             if cond_info is not None:
                 ckey, arm_tag, is_binary = cond_info
@@ -781,7 +994,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
             else:
                 gid = next_group
                 next_group += 1
-                if suffix in core.JSX and "?" in code:
+                if suffix in JSX_LIKE and "?" in code:
                     confirmed.add(gid)
                 opened_branch = ("if", gid, 0, None)
 
@@ -794,6 +1007,29 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         is_decl = number == start and FN_DECL_RE.match(raw) is not None
         if ".gap(" in raw or re.search(r"\bgap-\d+", raw):
             gap_calls += 1
+        if not is_decl:
+            _collect_consistency(raw, suffix, number, radii, font_sizes)
+            slop_msg = _slop_surface_cue(raw, fn_modal_hint or has_modal_box)
+            if slop_msg:
+                slop_findings.append((
+                    number,
+                    f"{name}: {slop_msg}",
+                    "use plain theme surface and border tokens instead of decorative gradients, blur, or heavy glow",
+                ))
+            if SLOP_GRAD_CLIP_RE.search(raw) and SLOP_GRAD_TRANS_RE.search(raw):
+                slop_findings.append((
+                    number,
+                    f"{name}: decorative gradient text (bg-clip-text)",
+                    "use a plain theme text token and show hierarchy via weight or size",
+                ))
+            dot_ctx = "\n".join(lines[max(0, number - 3):min(len(lines), number + 2)])
+            if suffix in WEB_EXT and _is_tw_animated_dot(raw, dot_ctx):
+                slop_findings.append((
+                    number,
+                    f"{name}: decorative pulsing status dot",
+                    "colour only the status word with a semantic token; keep pulse animations for real loading states",
+                ))
+
         if in_loop:
             if not loop_primary_seen and _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_primary_helpers):
                 raw_items["primary_accents"].append((loop_bp, number))
@@ -804,11 +1040,18 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         elif not is_decl:
             if MODAL_BOX_RE.search(raw):
                 has_modal_box = True
-            if DIVIDER_RE.search(raw):
+            for _ in DIVIDER_RE.finditer(raw):
                 raw_items["dividers"].append((eval_bp, number))
-            if BADGE_RE.search(raw):
+            badge_hits = len(list(BADGE_RE.finditer(raw)))
+            if badge_hits:
+                for _ in range(badge_hits):
+                    raw_items["badges"].append((eval_bp, number))
+            elif suffix in WEB_EXT and _is_tw_pill(raw):
                 raw_items["badges"].append((eval_bp, number))
-            if ICON_RE.search(raw):
+            icon_hits = len(list(ICON_RE.finditer(raw)))
+            if imported_icon_re is not None:
+                icon_hits += len(list(imported_icon_re.finditer(raw)))
+            for _ in range(icon_hits):
                 raw_items["icons"].append((eval_bp, number))
             if INFO_HINT_RE.search(raw):
                 raw_items["info_hints"].append((eval_bp, number))
@@ -816,6 +1059,8 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
                 raw_items["primary_accents"].append((eval_bp, number))
             if HEADLINE_RE.search(raw):
                 raw_items["headlines"].append((eval_bp, number))
+            if FILTER_CHIP_RE.search(raw):
+                flat_filter_chips.append((eval_bp, number))
             if FILTER_TRIGGER_RE.search(raw):
                 raw_items["filter_triggers"].append((eval_bp, number))
                 window_lines = "\n".join(lines[number - 1:min(end, number + 8)])
@@ -825,7 +1070,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
                     if width >= 140:
                         fixed_width_triggers.append((number, width))
             spacer_m = SPACER_RE.search(raw)
-            if spacer_m and float(spacer_m.group("px") or 20) >= 16:
+            if spacer_m and float(spacer_m.group("px") or spacer_m.group("egui_px") or 20) >= 16:
                 spacers.append(number)
             if INNER_CARD_CALL_RE.search(raw):
                 raw_items["inner_cards"].append((eval_bp, number))
@@ -849,26 +1094,38 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         if len(chain_m) >= 3:
             inline_chains[tuple(chain_m[:4])].append(number)
 
+        prev_cards = len(card_lines)
         max_depth, max_depth_line = _track_line_boxes(
             raw, code, suffix, delim_state, stack, in_loop, card_lines, raw_items, eval_bp,
             number, max_depth, max_depth_line, is_decl=is_decl, box_lines=box_lines,
         )
+        if not in_loop and not is_decl:
+            pad = _card_padding_px(raw, suffix)
+            if pad is not None:
+                if len(card_lines) > prev_cards or number in card_lines:
+                    card_paddings.append((len(stack), pad, number))
+                elif stack and stack[-1][1] in card_lines:
+                    card_paddings.append((len(stack), pad, stack[-1][1]))
 
         if opened_branch:
             kind, gid, arm, cond_meta = opened_branch
             if kind == "single_ret":
                 branch_stack.append([indent, gid, 1, "ret_rest", True, False, None])
             else:
-                branch_stack.append([indent, gid, arm, kind, kind != "if" or (suffix in core.JSX and "?" in code), False, cond_meta])
+                branch_stack.append([indent, gid, arm, kind, kind != "if" or (suffix in JSX_LIKE and "?" in code), False, cond_meta])
 
         if _is_text_stack_line(lines, number, raw, suffix):
             current_run.append(number)
-        elif stripped not in ("{", "}", ");", ")"):
+        elif stripped not in ("{", "}", ");", ")") and not (
+            current_run and suffix in WEB_EXT and (TEXT_CLOSE_ONLY_RE.match(stripped) or stripped.startswith('{"'))
+        ):
             if len(current_run) > cfg["max_header_stack"]:
                 header_runs.append(list(current_run))
             current_run.clear()
     if len(current_run) > cfg["max_header_stack"]:
         header_runs.append(current_run)
+    if len(flat_filter_chips) >= 3:
+        raw_items["filter_chip_strips"].append(flat_filter_chips[0])
 
     clean_bp = lambda bp: tuple(pair for pair in bp if pair[0] in confirmed)
     count_keys = (
@@ -898,13 +1155,15 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         **items, "counts": counts, "touched_counts": touched_counts,
         "local_entries": local_entries, "spacers": spacers,
         "fixed_width_triggers": fixed_width_triggers,
+        "slop_findings": slop_findings,
+        "radii": radii, "font_sizes": font_sizes, "card_paddings": card_paddings,
         "gap_calls": gap_calls, "header_runs": header_runs,
         "inline_chains": inline_chains, "calls": calls,
         "touched": any(look(n) for n in range(start, end + 1)),
     }
 
 
-def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False):
+def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False, include_consistency=True):
     cfg = core.C.design
     name = stats["name"]
     if not stats["touched"]:
@@ -969,6 +1228,11 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False)
                 f"{name}: fixed-width filter/sort trigger ({width}px) crowds toolbar",
                 "size trigger to content or consolidate secondary filters into a single Filters menu",
             ))
+    seen_slop = set()
+    for line_no, prob, fix in stats["slop_findings"]:
+        if look(line_no) and prob not in seen_slop:
+            seen_slop.add(prob)
+            out.append(core.Finding(rel, line_no, "design", prob, fix))
     if stats["gap_calls"] > 0 and len(stats["spacers"]) >= 2 and any(look(n) for n in stats["spacers"]):
         out.append(core.Finding(
             rel, stats["spacers"][0], "design",
@@ -990,6 +1254,39 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False)
                 f"{name}: repeated inline style pattern ({'.'.join(sig)}) {len(locs)}x on screen",
                 "extract to a shared theme-backed helper or simplify repeated cards",
             ))
+    if include_consistency:
+        radii = stats["radii"]
+        if len(radii) > 3 and any(look(ln) for ln in radii.values()):
+            first_ln = min(radii.values())
+            sample = ", ".join(sorted(radii)[:6])
+            out.append(core.Finding(
+                rel, first_ln, "design",
+                f"{name}: inconsistent corner radii ({len(radii)} distinct non-pill values: {sample})",
+                "standardize on 1-2 project radius tokens (control radius and card radius)",
+            ))
+        font_sizes = stats["font_sizes"]
+        if len(font_sizes) > 5 and any(look(ln) for ln in font_sizes.values()):
+            first_ln = min(font_sizes.values())
+            sample = ", ".join(sorted(font_sizes)[:7])
+            out.append(core.Finding(
+                rel, first_ln, "design",
+                f"{name}: inconsistent typography scale ({len(font_sizes)} distinct font sizes: {sample})",
+                "limit a single view to 3-4 typography scale steps from the theme",
+            ))
+        by_depth = defaultdict(list)
+        for depth, pad, ln in stats["card_paddings"]:
+            by_depth[depth].append((pad, ln))
+        for entries in by_depth.values():
+            pads = sorted({p for p, _ in entries})
+            if len(entries) >= 2 and len(pads) >= 2 and pads[-1] - pads[0] >= 8.0 and any(look(ln) for _, ln in entries):
+                first_ln = min(ln for _, ln in entries)
+                pad_desc = ", ".join(f"{p:g}px" for p in pads[:4])
+                out.append(core.Finding(
+                    rel, first_ln, "design",
+                    f"{name}: inconsistent padding across sibling cards ({pad_desc})",
+                    "use one consistent padding token for sibling cards at the same hierarchy level",
+                ))
+                break
 
 
 def _file_symbols(source):
@@ -1010,7 +1307,7 @@ def _peer_record(ppath, file_cache):
     key = str(ppath.resolve())
     if key in file_cache:
         return file_cache[key]
-    if not ppath.is_file() or ppath.suffix.lower() not in core.CODE:
+    if not ppath.is_file() or ppath.suffix.lower() not in CODE_EXT:
         file_cache[key] = None
         return None
     rel = core.relative(ppath)
@@ -1021,15 +1318,16 @@ def _peer_record(ppath, file_cache):
         file_cache[key] = None
         return None
     psource = ppath.read_text(encoding="utf-8", errors="replace")
-    if not core.is_ui(rel, psource):
+    psuf = ppath.suffix.lower()
+    if not _is_target_file(rel, psuf, psource):
         file_cache[key] = None
         return None
-    psuf = ppath.suffix.lower()
     praw = psource.splitlines()
-    plines = copy_rules.jsx_lines(praw) if psuf in core.JSX else praw
+    pnorm = normalize_jsx_tags(praw) if psuf in WEB_EXT else praw
+    plines = copy_rules.jsx_lines(pnorm) if psuf in JSX_LIKE else pnorm
     ptest = core.rust_test_start(praw) if psuf == ".rs" else None
     pskip = core.ignored_lines(praw)
-    fn_names = {name for _, name, _ in _function_spans(plines, psuf, ptest)}
+    fn_names = {name for _, name, _ in _function_spans(plines, psuf, ptest, fallback_name=ppath.stem)}
     rec = (rel, ppath, plines, psource, psuf, ptest, pskip, fn_names)
     file_cache[key] = rec
     return rec
@@ -1085,23 +1383,26 @@ def _resolve_callee(cur_rel, cur_meta, qual, target, metas_by_rel):
 
 def _analyze_unit(rel, path, lines, source, suffix, test_from, look, skip, peer_metas=None, primary_helpers=(), non_primary_helpers=()):
     """Parses spans and analyses every function in one UI file."""
-    spans = _function_spans(lines, suffix, test_from)
+    spans = _function_spans(lines, suffix, test_from, fallback_name=path.stem)
     local_names = {name for _, name, _ in spans}
     known_callees = set(local_names)
     if peer_metas:
         for meta in peer_metas.values():
             known_callees |= set(meta["fn_names"])
+    imported_icons = _extract_imported_icons(source) if suffix in WEB_EXT else set()
+    impls, imports = _file_symbols(source)
+    is_modal_file = bool(MODAL_CALLEE_RE.search(rel)) or any(MODAL_CALLEE_RE.search(imp) for imp in impls)
     by_name = {}
     for start, name, end in spans:
         by_name[name] = _analyze_fn(
             lines, suffix, start, name, end, look, skip, known_callees,
             primary_helpers=primary_helpers, non_primary_helpers=non_primary_helpers,
+            imported_icons=imported_icons, is_modal_file=is_modal_file,
         )
-    impls, imports = _file_symbols(source)
     return {"rel": rel, "path": path, "by_name": by_name, "fn_names": local_names, "impls": impls, "imports": imports}
 
 
-def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens, out, cache=None):
+def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens, out, cache=None, include_consistency=True):
     cfg = core.C.design
     uses_tooltips = tokens.get("uses_tooltips", False)
     primary_helpers = tokens.get("primary_helpers", ())
@@ -1110,7 +1411,7 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
     metas = store.setdefault("units", {})
     file_cache = store.setdefault("files", {})
     peers = _screen_peer_paths(path, file_cache)
-    all_fn_names = {name for _, name, _ in _function_spans(lines, suffix, test_from)}
+    all_fn_names = {name for _, name, _ in _function_spans(lines, suffix, test_from, fallback_name=path.stem)}
     for _, _, _, _, _, _, _, p_names in peers:
         all_fn_names |= p_names
 
@@ -1141,9 +1442,21 @@ def _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, 
     local_modal_card_fns = set()
     for stats in cur_meta["by_name"].values():
         before_len = len(out)
-        _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=is_modal_file)
+        _emit_fn_findings(
+            rel, stats, uses_tooltips, look, out,
+            is_modal_file=is_modal_file, include_consistency=include_consistency,
+        )
         if any("inner boxed card inside a modal" in f.problem for f in out[before_len:]):
             local_modal_card_fns.add(stats["name"])
+    # Include lean status-dot and decorative-badge rules (deduped by key) so design_audit is the single [design] owner.
+    seen_keys = {f.key() for f in out}
+    lean_extra = []
+    _lean_slop_badges(rel, lines, suffix, look, skip, test_from, lean_extra)
+    _lean_gpui_status_dots(rel, lines, suffix, look, skip, test_from, lean_extra)
+    for f in lean_extra:
+        if f.key() not in seen_keys:
+            seen_keys.add(f.key())
+            out.append(f)
 
     called_anywhere = set()
     for m_rel, m_data in metas_by_rel.items():
@@ -1309,14 +1622,17 @@ def _check_css_line(rel, number, raw, tokens, out):
                 out.append(core.Finding(rel, number, "style", f"hardcoded CSS border-radius {rm.group(1)}px", CSS_FIX))
 
 
-def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
-    if is_theme_file(rel):
+def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out, source=None):
+    if is_theme_file(rel, source):
         return
-    limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(lines)
+    work_lines = normalize_jsx_tags(lines) if suffix in WEB_EXT else lines
+    eff_look = spacing._absorbed_look(lines, work_lines, look) if suffix in WEB_EXT else look
+    sfc_style_lines = spacing._sfc_style_lines(lines) if suffix in MARKUP_EXT else None
+    limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(work_lines)
     in_block_comment = False
     theme_scope_depth = 0
     for number in range(1, limit + 1):
-        raw = lines[number - 1]
+        raw = work_lines[number - 1]
         if suffix in STYLE_EXT:
             stripped = raw.strip()
             if in_block_comment:
@@ -1333,7 +1649,7 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
             if theme_scope_depth > 0:
                 theme_scope_depth = max(0, theme_scope_depth + stripped.count("{") - stripped.count("}"))
                 continue
-        if number in skip or not look(number):
+        if number in skip or not eff_look(number):
             continue
         if core.comment_of(raw, suffix) is not None or core.LOG_CONTEXT.search(raw):
             continue
@@ -1349,6 +1665,13 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                         f'hardcoded color literal "{m.group(0)[:36]}"',
                         "use project Palette / theme color variable",
                     ))
+            elif EGUI_COLOR_RE.search(raw):
+                em = EGUI_COLOR_RE.search(raw)
+                out.append(core.Finding(
+                    rel, number, "style",
+                    f'hardcoded color literal "{em.group(0)[:36]}"',
+                    "use project Palette / theme color variable",
+                ))
             elif RS_RGBA_LIT_RE.search(raw):
                 out.append(core.Finding(
                     rel, number, "style",
@@ -1356,7 +1679,7 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                     "derive from theme Palette (e.g. Rgba { a: ..., ..p.surface })",
                 ))
             if tokens["has_font_tokens"]:
-                fm = RS_FONT_SIZE_RE.search(raw)
+                fm = RS_FONT_SIZE_RE.search(raw) or EGUI_FONT_SIZE_RE.search(raw)
                 if fm and float(fm.group(1)) >= 10:
                     out.append(core.Finding(
                         rel, number, "style",
@@ -1367,7 +1690,7 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                 rm = RS_RADIUS_RE.search(raw)
                 if rm:
                     radius = float(rm.group(1))
-                    nearby = "\n".join(lines[max(0, number - 3):min(limit, number + 2)])
+                    nearby = "\n".join(work_lines[max(0, number - 3):min(limit, number + 2)])
                     circular = any(abs(float(sz) - 2. * radius) <= 1. for sz in RS_CIRCLE_SIZE_RE.findall(nearby))
                     if radius > 3. and not circular:
                         out.append(core.Finding(
@@ -1375,7 +1698,9 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                             f"hardcoded corner radius px({rm.group(1)})",
                             "use project radius token (e.g. p.control_radius / p.card_radius)",
                         ))
-        elif suffix in core.JS:
+        elif suffix in WEB_EXT:
+            if sfc_style_lines is not None and sfc_style_lines[number - 1].strip():
+                continue
             tw_c = TW_COLOR_RE.search(raw)
             if tw_c and "var(--" not in tw_c.group(0):
                 out.append(core.Finding(
@@ -1383,8 +1708,8 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                     f'hardcoded Tailwind arbitrary color "{tw_c.group(0)[:36]}"',
                     CSS_FIX,
                 ))
-            tw_raw = TW_RAW_COLOR_RE.search(raw) if tokens["has_palette"] and not tw_c else None
-            if tw_raw:  # the project names its colours; a stock palette shade bypasses them
+            tw_raw = TW_RAW_COLOR_RE.search(raw) if tokens.get("has_tw_semantic_colors") else None
+            if tw_raw:  # project defines semantic Tailwind colors; stock palette shade bypasses them
                 out.append(core.Finding(
                     rel, number, "style",
                     f'stock Tailwind color "{tw_raw.group(0)}" in a themed project',
@@ -1454,12 +1779,17 @@ def _style_checks(rel, lines, suffix, look, skip, test_from, tokens, out):
                         "hardcoded inline QSS size/radius",
                         QSS_FIX,
                     ))
+    if sfc_style_lines is not None:
+        for number, raw in enumerate(sfc_style_lines, 1):
+            if raw.strip() and number not in skip and look(number) and not CSS_VAR_DECL_RE.match(raw):
+                _check_css_line(rel, number, raw, tokens, out)
 
 
 _SPACING_SCALES = {}
 FN_HEAD_RE = re.compile(
-    r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|def|function)\s+(\w+)"
-    r"|\s*(?:export\s+)?(?:const|let)\s+([A-Z]\w*)\s*=\s*(?:\([^)]*\)|\w+)\s*=>"
+    r"\s*(?:pub(?:\([^)]*\))?\s+|export\s+(?:default\s+)?)?(?:async\s+)?(?:fn|def|function)\s+(\w+)"
+    r"|\s*(?:export\s+)?(?:const|let)\s+([A-Z]\w*)(?:\s*:\s*[^=]+)?\s*=\s*"
+    r"(?:(?:React\.)?(?:memo|forwardRef)\s*\(\s*)?(?:async\s+)?(?:function\b|\([^)]*\)(?:\s*:\s*[^=]+)?\s*=>|\w+\s*=>)"
 )
 
 
@@ -1477,14 +1807,14 @@ def spacing_scale(root=None):
     return _SPACING_SCALES[key]
 
 
-def _spacing_checks(rel, raw_lines, suffix, look, test_from, out):
-    if is_theme_file(rel):
+def _spacing_checks(rel, raw_lines, suffix, look, test_from, out, source=None):
+    if is_theme_file(rel, source):
         return
     limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(raw_lines)
     lines = raw_lines[:limit]
     # The enclosing function by its header line: `render_owner` per line costs ~60 ms a file.
     heads = [(number, m.group(1) or m.group(2)) for number, line in enumerate(lines, 1)
-             for m in [FN_HEAD_RE.match(line)] if m and (m.group(1) or m.group(2))] if suffix in core.CODE else []
+             for m in [FN_HEAD_RE.match(line)] if m and (m.group(1) or m.group(2))] if suffix in CODE_EXT else []
     starts = [number for number, _ in heads]
 
     def fn_of(line):
@@ -1495,11 +1825,255 @@ def _spacing_checks(rel, raw_lines, suffix, look, test_from, out):
     out += spacing.check(rel, lines, suffix, fn_of, look, steps, tokens)
 
 
-def scan_file(path, only=None, tokens=None, checks=None, cache=None):
-    return [f for f in raw_scan_file(path, only=only, tokens=tokens, checks=checks, cache=cache) if not core.accepted(f)]
+# ---------------------------------------------------------------- lean [design] single-owner entry point
+
+_LEAN_BOX_TAG = re.compile(
+    r"<(/?)(Card|Paper|Panel|div|section|article|aside)\b([^>]*?)(/?)>|"
+    r"<(Card|Paper|Panel|div|section|article|aside)\b([^>]*)$"
+)
+_LEAN_LIST_ITEM = re.compile(r"\.(?:map|flatMap)\(|\bv-for=|\{#each\b")
+_LEAN_CARD_CLASS = re.compile(r"\b(?:border(?!-(?:0|none|transparent)\b)|shadow(?:-\w+)?|card|ring)\b")
+_LEAN_BADGE_OPEN = re.compile(
+    r"<(?:Badge|Chip|Tag|Pill)\b|\b(?:badge|chip|tag|pill|status_pill)\s*\("
+)
+_LEAN_HYPE = re.compile(
+    r"(?i)^\W*(?:new|novo|nova|beta|alpha|pro|ai|ia|hot|popular|recommended|recomendad[oa]|smart|"
+    r"premium|trending|exclusive|exclusivo|live|ao vivo|ai[\s-]powered|powered by \w+)\W*$"
+)
+_LEAN_SLOP_LOOK = re.compile(
+    r"bg-gradient|linear-gradient|gradient\(|animate-(?:pulse|ping)|uppercase[^\"']*tracking-|"
+    r"tracking-\w+[^\"']*uppercase|^\s*[•●◉]|rounded-full\s+(?:h|w|size)-(?:1|1\.5|2)\b"
+)
+_LEAN_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+_GPUI_DOT_SIZE = re.compile(r"\.(?:size|w)\(px\(([5-9](?:\.\d*)?)\)\)")
+_GPUI_DOT_BG = re.compile(r"\.bg\(([^)]+)\)")
+_DOT_NON_STATUS = re.compile(
+    r"(?i)(?<![a-z])(?:store_dot|series|legend|plot|chart|bullet|item_row|markdown|timeline|milestone|step|avatar|thumb|badge_dot)(?![a-z])"
+    r"|\.when\(\s*(?:checked|selected|active)\b"
+)
+_DOT_STATUS_OWNER = re.compile(r"(?i)(?:status|badge|pill|chip|monitor_bar|banner|state)")
+_DOT_STATUS_COLOR = re.compile(r"(?i)\b(?:dot|ink|status\w*|success|danger|warning|accent|focus_ring)\b")
 
 
-def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
+def _lean_owner(lines, number, fallback):
+    owner = copy_rules.render_owner(lines, number)
+    if owner[0] != 0:
+        return owner
+    for back in range(number, 0, -1):
+        hm = FN_HEAD_RE.match(lines[back - 1])
+        if hm and (hm.group(1) or hm.group(2)):
+            return (back, hm.group(1) or hm.group(2))
+    return (1, fallback)
+
+
+def _lean_nested_cards(rel, lines, look, skip, out):
+    """Multi-line-safe nested card detector (JSX/Vue/Svelte). Self-closing tags and border-none never stack."""
+    limit = core.C.design.get("max_card_nesting", 2)
+    stack, deepest, where, touched = [], 0, 0, False
+    for number, line in enumerate(lines, 1):
+        if number in skip or not line:
+            continue
+        for m in _LEAN_BOX_TAG.finditer(line):
+            closing = m.group(1)
+            name = m.group(2) or m.group(5)
+            attrs = m.group(3) or m.group(6) or ""
+            selfclose = m.group(4)
+            if closing:
+                if stack:
+                    stack.pop()
+                continue
+            card = name in ("Card", "Paper", "Panel") or bool(_LEAN_CARD_CLASS.search(attrs))
+            if card and any(_LEAN_LIST_ITEM.search(lines[i]) for i in range(max(0, number - 3), number)):
+                card = False
+            if selfclose:
+                continue
+            stack.append(card)
+            depth = sum(stack)
+            if card and depth > deepest:
+                deepest, where = depth, number
+            if card and depth > limit and look(number):
+                touched = True
+    if deepest > limit and touched:
+        out.append(core.Finding(
+            rel, where, "design",
+            f"{deepest} cards nested inside each other (limit {limit})",
+            "keep one box; separate the inner groups with spacing and a heading, not another border",
+        ))
+
+
+def _lean_slop_badges(rel, lines, suffix, look, skip, test_from, out):
+    """Flags decorative/hype badges and Tailwind inline pill soup."""
+    limit = (test_from - 1) if (suffix == ".rs" and test_from) else len(lines)
+    lit_suffix = ".tsx" if suffix in MARKUP_EXT else suffix
+    fallback = Path(rel).stem
+    loud, styled, pills = defaultdict(list), defaultdict(list), defaultdict(list)
+    for number in range(1, limit + 1):
+        if number in skip:
+            continue
+        line = lines[number - 1]
+        if not line.strip() or core.comment_of(line, suffix) is not None:
+            continue
+        is_badge = bool(_LEAN_BADGE_OPEN.search(line))
+        is_pill = suffix in WEB_EXT and _is_tw_pill(line)
+        if not is_badge and not is_pill:
+            continue
+        owner = _lean_owner(lines, number, fallback)
+        if is_pill:
+            pills[owner].append(number)
+        near = lines[number - 1:min(limit, number + 2)]
+        texts = [t for l in near for t in core.literals(l, lit_suffix)]
+        if any(_LEAN_HYPE.match(t) or _LEAN_EMOJI_RE.search(t) for t in texts):
+            loud[owner].append(number)
+        elif any(_LEAN_SLOP_LOOK.search(l) for l in near) or any(_LEAN_SLOP_LOOK.search(t) for t in texts):
+            styled[owner].append(number)
+    for owner in set(loud) | set(styled):
+        found = sorted(set(loud[owner] + styled[owner]))
+        if (loud[owner] or len(styled[owner]) >= 2) and any(look(n) for n in found):
+            out.append(core.Finding(
+                rel, found[0], "design",
+                f"{owner[1]}: {len(found)} decorative badges (lines {', '.join(map(str, found[:5]))})",
+                "keep a badge only for a state the user acts on; no dot, gradient, pulse or hype word",
+            ))
+    max_badges = core.C.design.get("max_badges", 6)
+    for owner, found in pills.items():
+        if len(found) > max_badges and owner not in loud and owner not in styled and any(look(n) for n in found):
+            out.append(core.Finding(
+                rel, found[0], "design",
+                f"{owner[1]}: {len(found)} badges/chips cluttering one view (limit {max_badges})",
+                "keep only status chips that drive user action",
+            ))
+
+
+def _lean_gpui_status_dots(rel, lines, suffix, look, skip, test_from, out):
+    """Detects decorative GPUI status dots beside status text."""
+    if suffix != ".rs":
+        return
+    limit = (test_from - 1) if test_from else len(lines)
+    fallback = Path(rel).stem
+    for number in range(1, limit + 1):
+        if number in skip or not look(number):
+            continue
+        line = lines[number - 1]
+        if core.comment_of(line, suffix) is not None:
+            continue
+        line_s = line.strip()
+        size_match = _GPUI_DOT_SIZE.search(line_s)
+        if not size_match:
+            continue
+        head = " ".join(l.strip() for l in lines[max(0, number - 6):number - 1])
+        tail = " ".join(l.strip() for l in lines[number - 1:min(limit, number + 4)])
+        cut_head = max(head.rfind(".child("), head.rfind(";"))
+        prefix = head[cut_head + 1:] if cut_head >= 0 else head
+        if "div()" in prefix:
+            prefix = prefix[prefix.rfind("div()"):]
+        after_size = tail[size_match.start():]
+        cut = re.search(r"\.child\(|;", after_size)
+        element = (prefix + " " + tail[:size_match.start()] + (after_size[:cut.start()] if cut else after_size)).strip()
+        if "div()" in element:
+            element = element[element.rfind("div()"):]
+        if ".rounded_full()" not in element or ".border_2()" in element:
+            continue
+        bg_match = _GPUI_DOT_BG.search(element)
+        if not bg_match:
+            continue
+        if ".w(px(" in element and ".h(px(" not in element:
+            continue
+        owner = _lean_owner(lines, number, fallback)
+        context = "\n".join(lines[max(0, number - 4):min(limit, number + 6)])
+        if _DOT_NON_STATUS.search(owner[1]) or _DOT_NON_STATUS.search(context):
+            continue
+        bg_arg = bg_match.group(1)
+        if not (
+            _DOT_STATUS_OWNER.search(owner[1])
+            or _DOT_STATUS_COLOR.search(bg_arg)
+            or ".text_color(" in context
+        ):
+            continue
+        out.append(core.Finding(
+            rel, number, "design",
+            f"{owner[1]}: decorative status dot",
+            "colour only the status word with the semantic token; drop the dot",
+        ))
+
+
+def scan_lean_design(path, rel, text, repo, only=None):
+    """Single canonical owner of lean [design] layout/chrome/AI-slop rules for hunt.py / stop_gate.py:
+    nested cards/styled boxes, decorative/slop badges & pills, GPUI/Tailwind status dots, and
+    composite AI-slop cues. Excludes heavier per-screen consistency checks (radii, font scale,
+    sibling card padding) which stay scoped to full /tautology-debloat-design audits."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in CODE_EXT or is_theme_file(rel, text) or core.is_test(rel):
+        return []
+    if not _is_target_file(rel, suffix, text):
+        return []
+    raw_lines = text.splitlines()
+    skip = core.ignored_lines(raw_lines)
+    base_look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
+    test_from = core.rust_test_start(raw_lines) if suffix == ".rs" else None
+    norm_lines = normalize_jsx_tags(raw_lines) if suffix in WEB_EXT else raw_lines
+    eff_look = spacing._absorbed_look(raw_lines, norm_lines, base_look) if suffix in WEB_EXT else base_look
+    lines = copy_rules.jsx_lines(norm_lines) if suffix in JSX_LIKE else norm_lines
+    fallback = path.stem
+    is_modal_file = bool(MODAL_CALLEE_RE.search(rel))
+
+    out = []
+    if suffix in JSX_LIKE:
+        _lean_nested_cards(rel, norm_lines, eff_look, skip, out)
+    _lean_slop_badges(rel, lines, suffix, eff_look, skip, test_from, out)
+    _lean_gpui_status_dots(rel, raw_lines, suffix, base_look, skip, test_from, out)
+
+    if suffix in WEB_EXT:
+        seen_slop = set()
+        limit = len(norm_lines)
+        for number in range(1, limit + 1):
+            if number in skip or not eff_look(number):
+                continue
+            line = norm_lines[number - 1]
+            if not line.strip() or core.comment_of(line, suffix) is not None:
+                continue
+            owner = _lean_owner(norm_lines, number, fallback)
+            fn_modal = is_modal_file or bool(MODAL_CALLEE_RE.search(owner[1]))
+            slop_msg = _slop_surface_cue(line, fn_modal)
+            if slop_msg:
+                prob = f"{owner[1]}: {slop_msg}"
+                if prob not in seen_slop:
+                    seen_slop.add(prob)
+                    out.append(core.Finding(
+                        rel, number, "design", prob,
+                        "use plain theme surface and border tokens instead of decorative gradients, blur, or heavy glow",
+                    ))
+            if SLOP_GRAD_CLIP_RE.search(line) and SLOP_GRAD_TRANS_RE.search(line):
+                prob = f"{owner[1]}: decorative gradient text (bg-clip-text)"
+                if prob not in seen_slop:
+                    seen_slop.add(prob)
+                    out.append(core.Finding(
+                        rel, number, "design", prob,
+                        "use a plain theme text token and show hierarchy via weight or size",
+                    ))
+            dot_ctx = "\n".join(norm_lines[max(0, number - 3):min(limit, number + 2)])
+            if _is_tw_animated_dot(line, dot_ctx):
+                prob = f"{owner[1]}: decorative pulsing status dot"
+                if prob not in seen_slop:
+                    seen_slop.add(prob)
+                    out.append(core.Finding(
+                        rel, number, "design", prob,
+                        "colour only the status word with a semantic token; keep pulse animations for real loading states",
+                    ))
+    return out
+
+
+def scan_file(path, only=None, tokens=None, checks=None, cache=None, include_consistency=True):
+    return [
+        f for f in raw_scan_file(
+            path, only=only, tokens=tokens, checks=checks, cache=cache,
+            include_consistency=include_consistency,
+        )
+        if not core.accepted(f)
+    ]
+
+
+def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None, include_consistency=True):
     rel = core.relative(path)
     suffix = path.suffix.lower()
     if suffix not in SCAN_EXT or core.C.skip_dirs & set(Path(rel).parts) or not path.is_file():
@@ -1512,19 +2086,24 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None):
 
     wanted = checks or CHECKS
     tokens = tokens or discover_project_tokens()
-    lines = copy_rules.jsx_lines(source.splitlines()) if suffix in core.JSX else source.splitlines()
     raw_lines = source.splitlines()
+    norm_lines = normalize_jsx_tags(raw_lines) if suffix in WEB_EXT else raw_lines
+    lines = copy_rules.jsx_lines(norm_lines) if suffix in JSX_LIKE else norm_lines
     skip = core.ignored_lines(raw_lines)
-    look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
+    base_look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
+    look = spacing._absorbed_look(raw_lines, norm_lines, base_look) if suffix in WEB_EXT else base_look
     test_from = core.rust_test_start(raw_lines) if suffix == ".rs" else None
 
     out = []
-    if suffix in core.CODE and "design" in wanted and not is_theme_file(rel):
-        _audit_file_design(rel, path, lines, source, suffix, test_from, look, skip, tokens, out, cache=cache)
+    if suffix in CODE_EXT and "design" in wanted and not is_theme_file(rel, source):
+        _audit_file_design(
+            rel, path, lines, source, suffix, test_from, look, skip, tokens, out,
+            cache=cache, include_consistency=include_consistency,
+        )
     if "style" in wanted:
-        _style_checks(rel, raw_lines, suffix, look, skip, test_from, tokens, out)
+        _style_checks(rel, raw_lines, suffix, base_look, skip, test_from, tokens, out, source=source)
     if "spacing" in wanted:
-        _spacing_checks(rel, raw_lines, suffix, look, test_from, out)
+        _spacing_checks(rel, raw_lines, suffix, base_look, test_from, out, source=source)
     if suffix in core.CODE and "bloat" in wanted:
         out += [f for f in hunt.scan_file(path, only) if f.kind == "copy"]
     return out
@@ -1571,7 +2150,10 @@ def stop_report(repo, session, state, gate, files=None, lean=False, style_only=F
         only = gate.new_lines(snap, path) if snap.is_file() else core.added_lines(path)
         if only is None or only:
             checks = {"style"} if style_only else ({"design", "style"} | ({"spacing"} if not lean else set())) if path in styled else {"design"}
-            findings += scan_file(path, only=only, tokens=tokens, checks=checks, cache=cache)
+            findings += scan_file(
+                path, only=only, tokens=tokens, checks=checks, cache=cache,
+                include_consistency=not lean,
+            )
     if not lean:  # pruning rescans every check, style included; a full run does it
         core.prune_paths(
             file_paths,
@@ -2368,6 +2950,304 @@ def selftest():
             if not spacing.on_scale(snapped, sample_steps):
                 problems.append(f"spacing invariant broken: nearest({candidate})={snapped} is still off-scale")
                 break
+            snapped_fb = spacing.nearest(float(candidate), None)
+            if not spacing.on_scale(snapped_fb, None):
+                problems.append(f"fallback spacing invariant broken: nearest({candidate})={snapped_fb} is still off-scale")
+                break
+
+        # Wave 1+3: spacing.on_scale fallback math (rejects odd <=16 and 4k+/-1 >16 unless bordered)
+        for bad_px in (7., 9., 11., 13., 15., 17., 19., 25.):
+            if spacing.on_scale(bad_px, None):
+                problems.append(f"spacing.on_scale fallback falsely accepted {bad_px:g}px")
+        if not spacing.on_scale(11., None, bordered=True):
+            problems.append("spacing.on_scale rejected bordered 11px border compensation")
+
+        # Wave 1+3: Tailwind p-2 pt-8, horizontal pl/pr, cn(...), arbitrary [24px], input negative control
+        tw_space = web_repo / "src" / "components" / "SpaceTw.tsx"
+        tw_space.write_text(
+            "import { cn } from './utils';\n"
+            "export default function SpaceTw() {\n"
+            "  const extra = cn(\n"
+            "    'pt-8 pb-2',\n"
+            "    'p-[26px]'\n"
+            "  );\n"
+            "  return (\n"
+            "    <div className=\"p-2 pt-8\">\n"
+            "      <div className=\"p-2 pl-8\">horiz</div>\n"
+            "      <div className=\"pt-[24px] pb-[4px]\">arb</div>\n"
+            "      <div\n"
+            "        className={cn(\n"
+            "          'pt-8 pb-2',\n"
+            "          'p-[25px]'\n"
+            "        )}\n"
+            "      />\n"
+            "      <input className=\"pl-10 pr-3\" />\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        tw_space_out = "\n".join(str(f) for f in scan_file(tw_space, only=None, tokens=rev_tokens, checks={"spacing"}))
+        for needed in (
+            "SpaceTw: lopsided padding: 32px above, 8px below",
+            "SpaceTw: lopsided padding: 32px left, 8px right",
+            "SpaceTw: lopsided padding: 24px above, 4px below",
+            "SpaceTw: off-scale spacing 26px",
+            "SpaceTw: off-scale spacing 25px",
+        ):
+            if needed not in tw_space_out:
+                problems.append(f"SpaceTw.tsx missing spacing finding {needed!r}:\n{tw_space_out}")
+        if "40px left, 12px right" in tw_space_out:
+            problems.append(f"SpaceTw.tsx falsely flagged leading-icon <input> horizontal padding:\n{tw_space_out}")
+
+        # Wave 1+3: CSS auto, !important, rem, horizontal lopsided, and styles/ non-theme vs token-only CSS
+        styles_dir = web_repo / "src" / "styles"
+        styles_dir.mkdir(parents=True, exist_ok=True)
+        dash_css = styles_dir / "Dashboard.css"
+        dash_css.write_text(
+            ".dash { color: #9333ea; font-size: 15px; border-radius: 14px; margin: 24px auto 4px; }\n"
+            ".imp { padding: 24px 16px 4px !important; }\n"
+            ".rem { padding: 1.625rem 0.25rem 0.25rem; }\n"
+            ".horiz { padding-left: 24px; padding-right: 4px; }\n",
+            encoding="utf-8",
+        )
+        vars_css = styles_dir / "variables.css"
+        vars_css.write_text(":root { --brand: #9333ea; --surface: #111111; --gap-md: 16px; }\n", encoding="utf-8")
+        dash_css_out = "\n".join(str(f) for f in scan_file(dash_css, only=None, tokens=rev_tokens, checks=CHECKS))
+        for needed in (
+            "CSS color literal",
+            ".dash: lopsided margin: 24px above, 4px below",
+            ".imp: lopsided padding: 24px above, 4px below",
+            ".rem: off-scale spacing 26px",
+            ".rem: lopsided padding: 26px above, 4px below",
+            ".horiz: lopsided padding: 24px left, 4px right",
+        ):
+            if needed not in dash_css_out:
+                problems.append(f"styles/Dashboard.css missing finding {needed!r}:\n{dash_css_out}")
+        if scan_file(vars_css, only=None, tokens=rev_tokens, checks=CHECKS):
+            problems.append("styles/variables.css (>50% custom properties) was not exempted as theme file")
+
+        # Wave 1+3: SlopDashboard.tsx (multi-line JSX + glassmorphism + gradient text + lucide icons + pills + FilterChip + pulsing dot + <p> stack)
+        # tautology: off (bad-on-purpose Tailwind fixture strings)
+        slop_tsx = web_repo / "src" / "screens" / "SlopDashboard.tsx"
+        slop_tsx.write_text(
+            'import { Sparkles, Zap, Shield, Rocket, Star, Check, ArrowRight, Bell, Globe, Cpu, Layers, Activity } from "lucide-react";\n'
+            "export default function SlopDashboard({ filters }: any) {\n"
+            "  return (\n"
+            "    <div\n"
+            '      className="min-h-screen bg-gradient-to-br from-purple-900 to-slate-900 shadow-2xl p-8"\n'
+            "    >\n"
+            "      <div\n"
+            '        className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-2xl p-6"\n'
+            "      >\n"
+            "        <div\n"
+            '          className="rounded-xl border border-purple-500/30 bg-slate-900/80 p-4"\n'
+            "        >\n"
+            "          <div\n"
+            '            className="rounded-lg border border-indigo-400/20 bg-slate-800/60 p-4"\n'
+            "          >\n"
+            "            <div\n"
+            '              className="rounded-md border border-slate-700 bg-slate-950 p-3"\n'
+            "            >\n"
+            '              <h1 className="bg-gradient-to-r from-purple-400 to-cyan-400 bg-clip-text text-transparent">AI Studio</h1>\n'
+            '              <span className="w-2 rounded-full h-2 bg-emerald-400 animate-pulse" />\n'
+            "              <Sparkles /> <Zap /> <Shield /> <Rocket /> <Star /> <Check />\n"
+            "              <ArrowRight /> <Bell /> <Globe /> <Cpu /> <Layers /> <Activity />\n"
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-emerald-500/20">Live</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-purple-500/20">AI Powered</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-blue-500/20">Beta</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-amber-500/20">Pro</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-pink-500/20">New</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-cyan-500/20">Fast</span>\n'
+            '              <span className="inline-flex rounded-full px-2 py-0.5 text-xs bg-rose-500/20">Hot</span>\n'
+            "              <Select />\n"
+            "              {filters.map((f: string) => (\n"
+            "                <FilterChip key={f}>{f}</FilterChip>\n"
+            "              ))}\n"
+            "              <p>\n"
+            "                Welcome to your AI powered analytics command center today.\n"
+            "              </p>\n"
+            "              <p>\n"
+            "                Track all your metrics seamlessly in one unified workspace.\n"
+            "              </p>\n"
+            "              <p>\n"
+            "                Get instant actionable insights with zero manual configuration needed.\n"
+            "              </p>\n"
+            "              <p>\n"
+            "                Click any card below to explore detailed performance trends.\n"
+            "              </p>\n"
+            "            </div>\n"
+            "          </div>\n"
+            "        </div>\n"
+            "      </div>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        # tautology: on
+        slop_out = "\n".join(str(f) for f in scan_file(slop_tsx, only=None, tokens=rev_tokens, checks={"design"}))
+        for needed in (
+            "overloaded hierarchy",
+            "icons in one view",
+            "badges/chips cluttering one view",
+            "stacked filter controls",
+            "stacked text blocks competing in sequence",
+            "decorative gradient/glassmorphism surface",
+            "decorative gradient text",
+            "decorative pulsing status dot",
+        ):
+            if needed not in slop_out:
+                problems.append(f"SlopDashboard.tsx missing expected finding {needed!r}:\n{slop_out}")
+        lean_slop = "\n".join(str(f) for f in scan_lean_design(slop_tsx, "src/screens/SlopDashboard.tsx", slop_tsx.read_text(encoding="utf-8"), web_repo))
+        for needed in (
+            "cards nested inside each other",
+            "decorative badges",
+            "decorative gradient/glassmorphism surface",
+            "decorative gradient text",
+            "decorative pulsing status dot",
+        ):
+            if needed not in lean_slop:
+                problems.append(f"scan_lean_design missed {needed!r} on SlopDashboard.tsx:\n{lean_slop}")
+
+        # Negative controls: multi-line self-closing <Card /> and border-none/transparent must NOT false-positive
+        neg_tsx = web_repo / "src" / "screens" / "NegControl.tsx"
+        neg_tsx.write_text(
+            "export const NegControl: React.FC = () => (\n"
+            '  <div className="bg-transparent border-none">\n'
+            '    <div className="border-transparent">\n'
+            '      <div className="border-none">\n'
+            '        <div className="border-none">\n'
+            "          <Card\n"
+            '            title="One"\n'
+            "          />\n"
+            "          <Card\n"
+            '            title="Two"\n'
+            "          />\n"
+            "          <Card\n"
+            '            title="Three"\n'
+            "          />\n"
+            "        </div>\n"
+            "      </div>\n"
+            "    </div>\n"
+            "  </div>\n"
+            ");\n",
+            encoding="utf-8",
+        )
+        if scan_file(neg_tsx, only=None, tokens=rev_tokens, checks={"design"}):
+            problems.append("NegControl.tsx falsely triggered design findings on border-none / self-closing <Card />")
+        if scan_lean_design(neg_tsx, "src/screens/NegControl.tsx", neg_tsx.read_text(encoding="utf-8"), web_repo):
+            problems.append("scan_lean_design falsely triggered on border-none / multi-line self-closing <Card />")
+
+        # Multi-line JSX style={{ fontSize, borderRadius }} & per-view consistency (full only, NOT lean)
+        consist_tsx = web_repo / "src" / "screens" / "ConsistView.tsx"
+        consist_tsx.write_text(
+            "export const ConsistView: React.FC = () => (\n"
+            "  <div>\n"
+            "    <div\n"
+            "      style={{\n"
+            "        fontSize: 15,\n"
+            "        borderRadius: 14,\n"
+            "      }}\n"
+            "    >\n"
+            '      <div className="rounded-sm text-xs">a</div>\n'
+            '      <div className="rounded-md text-sm">b</div>\n'
+            '      <div className="rounded-lg text-base">c</div>\n'
+            '      <div className="rounded-2xl text-lg">d</div>\n'
+            '      <span className="text-xl">e</span>\n'
+            '      <span className="text-2xl">f</span>\n'
+            '      <div className="bg-card border p-3">Card 1</div>\n'
+            '      <div className="bg-card border p-8">Card 2</div>\n'
+            "    </div>\n"
+            "  </div>\n"
+            ");\n",
+            encoding="utf-8",
+        )
+        consist_full = "\n".join(str(f) for f in scan_file(consist_tsx, only=None, tokens=rev_tokens, checks={"design", "style"}))
+        for needed in (
+            "hardcoded inline fontSize in JSX style",
+            "hardcoded inline borderRadius in JSX style",
+            "inconsistent corner radii",
+            "inconsistent typography scale",
+            "inconsistent padding across sibling cards",
+        ):
+            if needed not in consist_full:
+                problems.append(f"ConsistView.tsx missing {needed!r}:\n{consist_full}")
+        consist_lean = "\n".join(str(f) for f in scan_lean_design(consist_tsx, "src/screens/ConsistView.tsx", consist_tsx.read_text(encoding="utf-8"), web_repo))
+        if "inconsistent" in consist_lean:
+            problems.append(f"scan_lean_design leaked heavy consistency check:\n{consist_lean}")
+
+        # egui Rust support + GPUI status dot in scan_lean_design
+        egui_rs = web_repo / "src" / "screens" / "egui_panel.rs"
+        egui_rs.write_text(
+            "use egui::{Color32, Frame, RichText, Ui};\n"
+            "pub fn show_settings(ui: &mut Ui) {\n"
+            "    Frame::group(ui.style()).fill(Color32::from_rgb(255, 0, 170)).show(ui, |ui| {\n"
+            "        Frame::group(ui.style()).show(ui, |ui| {\n"
+            "            Frame::group(ui.style()).show(ui, |ui| {\n"
+            "                Frame::group(ui.style()).show(ui, |ui| {\n"
+            '                    ui.heading(RichText::new("One").size(22.0));\n'
+            '                    ui.heading(RichText::new("Two").size(22.0));\n'
+            "                    ui.separator(); ui.separator(); ui.separator(); ui.separator();\n"
+            "                    ui.add_space(26.0);\n"
+            "                });\n"
+            "            });\n"
+            "        });\n"
+            "    });\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        egui_out = "\n".join(str(f) for f in scan_file(egui_rs, only=None, tokens=rev_tokens, checks=CHECKS))
+        for needed in ("overloaded hierarchy", "competing HEADLINE", "dividers/separators", "hardcoded color literal", "off-scale spacing 26px"):
+            if needed not in egui_out:
+                problems.append(f"egui_panel.rs missing {needed!r}:\n{egui_out}")
+
+        gpui_dot_rs = web_repo / "src" / "screens" / "status_bar.rs"
+        gpui_dot_rs.write_text(
+            "use gpui::{div, prelude::*, px};\n"
+            "pub fn status_badge(p: Palette) -> impl IntoElement {\n"
+            "    div().flex()\n"
+            "        .child(div().size(px(7.)).rounded_full().bg(p.success))\n"
+            '        .child(div().text_color(p.text).child("Online"))\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        dot_lean = "\n".join(str(f) for f in scan_lean_design(gpui_dot_rs, "src/screens/status_bar.rs", gpui_dot_rs.read_text(encoding="utf-8"), web_repo))
+        if "decorative status dot" not in dot_lean:
+            problems.append(f"scan_lean_design missed GPUI decorative status dot:\n{dot_lean}")
+
+        # Vue & Svelte support
+        vue_f = web_repo / "src" / "screens" / "Panel.vue"
+        vue_f.write_text(
+            '<template><div class="bg-[#ff00aa] p-[26px] bg-gradient-to-r backdrop-blur">Hi</div></template>\n'
+            "<style>.box { padding: 25px; color: #123456; }</style>\n",
+            encoding="utf-8",
+        )
+        svelte_f = web_repo / "src" / "screens" / "Panel.svelte"
+        svelte_f.write_text('<div class="bg-[#ff00aa] p-[26px]">Hi</div>\n', encoding="utf-8")
+        vue_out = "\n".join(str(f) for f in scan_file(vue_f, only=None, tokens=rev_tokens, checks=CHECKS))
+        svelte_out = "\n".join(str(f) for f in scan_file(svelte_f, only=None, tokens=rev_tokens, checks=CHECKS))
+        for needed in ("Tailwind arbitrary color", "off-scale spacing 26px", "off-scale spacing 25px", "CSS color literal", "decorative gradient/glassmorphism"):
+            if needed not in vue_out:
+                problems.append(f"Panel.vue missing {needed!r}:\n{vue_out}")
+        for needed in ("Tailwind arbitrary color", "off-scale spacing 26px"):
+            if needed not in svelte_out:
+                problems.append(f"Panel.svelte missing {needed!r}:\n{svelte_out}")
+
+        # TW_RAW_COLOR_RE gating: requires semantic Tailwind tokens, and runs alongside TW_COLOR_RE
+        tw_mix = web_repo / "src" / "screens" / "TwColorMix.tsx"
+        tw_mix.write_text('export function TwMix() { return <div className="bg-[#ff00aa] text-purple-500">x</div>; }\n', encoding="utf-8")
+        no_sem_tokens = {**rev_tokens, "has_tw_semantic_colors": False}
+        sem_tokens = {**rev_tokens, "has_tw_semantic_colors": True}
+        out_no_sem = "\n".join(str(f) for f in scan_file(tw_mix, only=None, tokens=no_sem_tokens, checks={"style"}))
+        out_sem = "\n".join(str(f) for f in scan_file(tw_mix, only=None, tokens=sem_tokens, checks={"style"}))
+        if "stock Tailwind color" in out_no_sem:
+            problems.append(f"TW_RAW_COLOR_RE fired without semantic Tailwind tokens:\n{out_no_sem}")
+        if "Tailwind arbitrary color" not in out_sem or "stock Tailwind color" not in out_sem:
+            problems.append(f"TW_RAW_COLOR_RE skipped alongside TW_COLOR_RE:\n{out_sem}")
+
+        if visual_check.selftest() != 0:
+            problems.append("visual_check.selftest() failed")
     finally:
         core.SELFTEST = False
         shutil.rmtree(web_repo, ignore_errors=True)
