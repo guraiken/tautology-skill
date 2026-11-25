@@ -1,6 +1,6 @@
 ---
 name: tautology-debloat-design
-description: Audits a named screen for visual hierarchy overload, unnecessary visual repetition, excessive padding/bloat, meaningless elements, and visual overwhelm; applies a minimalist redesign strictly using project theme tokens/variables (no hardcoded styling) while running tautology and modular hooks. Invoke with /tautology-debloat-design <screen>.
+description: Audits a named screen for visual hierarchy overload, unnecessary visual repetition, excessive padding/bloat, meaningless elements, AI visual tics, visual inconsistencies, and visual overwhelm; applies a minimalist redesign strictly using project theme tokens/variables (no hardcoded styling) while running tautology and modular hooks. Invoke with /tautology-debloat-design <screen>.
 ---
 
 # Debloat design
@@ -24,7 +24,7 @@ Before touching layout or styling:
 - Read the project's theme, palette, typography/spacing/radius tokens, and CSS custom properties (`theme/`, `tokens`, `visual`, `styles/`, `tailwind.config`).
 - Read the shared UI component library (`components/`, `kit/`, design-system wrappers) so every adjusted button, card, field, header, or hint reuses what already exists.
 
-## 3. Run the structural & bloat audit
+## 3. Run the structural, visual & bloat audit
 
 Run the static and state inventory passes on the target screen files:
 ```
@@ -33,15 +33,15 @@ python <skill dir>/design_audit.py --all <screen files>
 python <tautology dir>/hunt.py --all <screen files>
 python <modular dir>/patterns.py <screen files>
 ```
-If the user supplied PNG/JPEG captures (or authorized visual verification in the project), run `--check-image <shot>` or `--compare <before> <after>` to verify visual density and changed regions alongside the code.
+**Screenshots / visual captures:** whenever the user supplies screenshots or visual verification is authorized, run `design_audit.py --check-image <shot>` (or `--compare <before> <after>`) for objective telemetry (`edge density`, `spatial std`, `accent islands`, size delta), then read `<skill dir>/VISION_AUDIT.md` and execute all 4 inspection passes (defects, indirect pollution, AI-slop, consistency) citing exact regions and elements.
 
 Evaluate every section across 5 axes:
-1. **Overloaded hierarchy:** cards inside cards, nested borders/fills, too many competing font weights or sizes.
-2. **Unnecessary visual repetition:** stacked title + subtitle + explanatory card saying the same thing, repeated dividers, repeated decorative icons/chips, or inline style chains that belong in a shared component.
+1. **Overloaded hierarchy:** cards inside cards, nested borders/fills, too many competing font weights or sizes, and decorative gradient/glassmorphism surfaces (`bg-gradient-*` + `backdrop-blur`/`shadow-xl`, gradient text).
+2. **Unnecessary visual repetition & inconsistency:** stacked title + subtitle + explanatory card saying the same thing, repeated dividers, repeated decorative icons/chips, inline style chains that belong in a shared component, or inconsistent corner radii (`> 3`), typography sizes (`> 5`), and sibling card paddings within one view.
 3. **Excessive padding & screen fill:** oversized blank spacers inside gap-spaced containers, heavy nested paddings, redundant explanatory boxes inflating height.
    **Spacing rhythm (`[spacing]` findings):** spacing must follow one clear, hierarchical scale. The audit learns the scale from the values the repository already uses and flags:
-   - values off that scale (±1 px tolerance, for border compensation);
-   - lopsided padding or margin, with one side 3× the other and 12 px apart;
+   - values off that scale (border-compensated `±1 px` only on bordered elements or coarse learned scales);
+   - lopsided padding or margin (vertical or horizontal), with one side 3× the other and 12 px apart;
    - a label farther from its control than the control is from the next item;
    - uneven gaps between siblings of the same kind;
    - three or more different spacer sizes in one stack;
@@ -49,7 +49,7 @@ Evaluate every section across 5 axes:
    - an inner stack spaced looser than the stack that holds it.
 
    Proximity decides the asymmetric cases. More room above a heading than below it is correct, and so is a label tight to its input. Fix with the container's gap and one larger step between groups, snapped to the scale or a spacing token. Do not insert new spacers.
-4. **Elements without clear purpose:** ornamental pills, labels/captions that restate what the control already shows, noisy secondary notes (remove them, or move genuinely helpful edge-case hints to the project's existing tooltip control — only if the project already uses tooltips).
+4. **Elements without clear purpose & AI-slop:** ornamental pills, fake pulsing/static status dots, gratuitous KPI stat strips, labels/captions that restate what the control already shows, noisy secondary notes (remove them, or move genuinely helpful edge-case hints to the project's existing tooltip control — only if the project already uses tooltips).
 5. **Visual overwhelm:** too many equal-weight groups fighting for attention at once instead of 1 clear primary flow — including **stacked/exposed filter rows** (secondary filter/sort dropdowns plus a permanent strip of status pills), **fixed-width filter/sort triggers** eating toolbar space, and **multiple competing solid primary accents** (save solid primary fill for the main CTA; keep selected filters and view toggles on a neutral/surface fill, and fold secondary filters into one `Filters` menu with active-only removable chips). **Project convention takes precedence:** when the repository already has a shared navigation or tab component using `primary` for active tabs (e.g., `category_tabs`), keep screens consistent with that design-system pattern instead of overriding it with a generic fill.
 
 If the screen is already clean and balanced across all 5 axes, report what was checked and **change nothing**.
@@ -60,7 +60,7 @@ When improvements are warranted:
 - **Preserve identity, anchors & parity:** keep the project's visual language, dark/light theme support, accessibility labels, and required actions (record intentional UI simplifications in `PARITY.md` or equivalent when the repo uses one). Before deleting or flattening structural headings or wrappers, check index-coupled logic (`scroll_to_top_of_item`, `bounds_for_item`, `.nth(...)`, test assertions) so navigation and state tracking remain intact.
 - **Zero hardcoded styling:** use only project theme variables (`Palette`, CSS vars `var(--*)`, typography/radius/spacing tokens) and shared UI components. Never introduce literal hex/RGB colors, magic font sizes, or magic corner radii outside theme definition files.
 - **Cut before adding:** flatten wrappers, drop unnecessary borders/dividers/spacers so whitespace defines hierarchy naturally, tighten copy (`tautology`), and extract any repeated pattern into the proper shared layer (`modular`).
-- **Visual verification:** if the user asks for a screenshot/capture or authorized visual verification exists in the repo (such as a project verify/capture harness covering screen states/modals without touching live user data), inspect before/after renders when layout balance or spacing cannot be confirmed from code alone. Never auto-launch GUI binaries when project rules forbid it.
+- **Visual verification:** if the user asks for a screenshot/capture or authorized visual verification exists in the repo (such as a project verify/capture harness covering screen states/modals without touching live user data), inspect before/after renders following `<skill dir>/VISION_AUDIT.md` and `--compare <before> <after>` when layout balance or spacing cannot be confirmed from code alone. Never auto-launch GUI binaries when project rules forbid it.
 
 ## 5. Verify & hooks
 
