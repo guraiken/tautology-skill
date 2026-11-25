@@ -1,5 +1,5 @@
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 @patch("billing.format_price")
@@ -44,3 +44,14 @@ def test_parse_case_b():
     session = open_session(cfg, token)
     res = evaluate(session, "item-b")
     assert res["status"] == "ok"
+
+
+def test_mock_echo():
+    rate = Mock(return_value=5)
+    assert rate() == 5
+
+
+def test_only_when_ready():
+    job = start_job()
+    if job.ready:
+        assert job.result == 7

@@ -16,3 +16,18 @@ it("checks array non-empty before iterating", () => {
 it("throws on invalid input", () => {
   expect(() => parseStrict("bad")).toThrow("invalid");
 });
+
+it("uses the mock through the unit under test", () => {
+  const fetchRate = jest.fn().mockReturnValue(5);
+  expect(convert(10, fetchRate)).toBe(50);
+  expect(fetchRate).toHaveBeenCalledWith("USD");
+});
+
+it("checks both branches of the discount", () => {
+  const order = buildOrder();
+  if (order.discounted) {
+    expect(order.total).toBe(90);
+  } else {
+    expect(order.total).toBe(100);
+  }
+});

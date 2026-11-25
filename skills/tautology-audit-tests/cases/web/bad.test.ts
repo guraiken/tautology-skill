@@ -16,3 +16,15 @@ it("swallows and sleeps", async () => {
     failMaybe();
   } catch (err) {}
 });
+
+it("echoes the stubbed mock", () => {
+  const fetchRate = jest.fn().mockReturnValue(5);
+  expect(fetchRate()).toBe(5);
+});
+
+it("asserts only when the flag is set", () => {
+  const order = buildOrder();
+  if (order.discounted) {
+    expect(order.total).toBe(90);
+  }
+});

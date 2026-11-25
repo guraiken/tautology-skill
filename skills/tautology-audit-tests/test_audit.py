@@ -361,6 +361,70 @@ def _check_multiline_and_bounds(rel, lines, suffix, block, look, out):
                 ))
 
 
+JS_MOCK_VAR_RE = re.compile(
+    r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:jest|vi)\.fn\s*\("
+    r"(?:\s*\)\s*\.\s*mock(?:Return|Resolved|Rejected)Value(?:Once)?\s*\(|\s*(?:async\s*)?\(\s*\)\s*=>)"
+)
+JS_SPY_RE = re.compile(
+    r"\b(?:jest|vi)\.spyOn\(\s*([\w.]+)\s*,\s*[\"'`](\w+)[\"'`]\s*\)\s*\.\s*mock(?:Return|Resolved|Rejected|Implementation)\w*\s*\("
+)
+RS_MOCK_EXPECT_RE = re.compile(r"\b(\w+)\s*\.\s*expect_(\w+)\s*\(\s*\)[\s\S]*?\.\s*(?:returning|return_const|return_once)\s*\(")
+
+
+def _check_mock_echo_and_silent_if(rel, lines, suffix, block, look, out):
+    """JS/TS and Rust: asserts straight on a stubbed mock's own return value, and `if` without `else` wrapping assertions."""
+    mocks = {}  # callable expression -> stub line
+    assert_re = r"\bexpect\s*\(" if suffix in core.JS else r"\bassert\w*!\s*\("
+    for number in range(block.body_start, block.end + 1):
+        raw = lines[number - 1]
+        if core.comment_of(raw, suffix) is not None or not raw.strip():
+            continue
+        if suffix in core.JS:
+            mm = JS_MOCK_VAR_RE.match(raw)
+            if mm:
+                mocks[mm.group(1)] = number
+            for sm in JS_SPY_RE.finditer(raw):
+                mocks[f"{sm.group(1)}.{sm.group(2)}"] = number
+        elif suffix == ".rs":
+            window = "\n".join(lines[number - 1:min(block.end, number + 3)])
+            rm = RS_MOCK_EXPECT_RE.match(window[len(raw) - len(raw.lstrip()):]) if "expect_" in raw else None
+            if rm:
+                mocks[f"{rm.group(1)}.{rm.group(2)}"] = number
+        if look(number) and mocks and re.search(assert_re, raw):
+            if suffix in core.JS:
+                em = re.search(r"\bexpect\s*\(\s*(?:await\s+)?([\w.]+)\s*\(", raw)
+                target = em.group(1) if em else None
+            else:
+                em = re.search(r"\bassert\w*!\s*\(\s*([\w.]+)\s*\(", raw)
+                target = em.group(1) if em else None
+            if target in mocks:
+                out.append(core.Finding(
+                    rel, number, "self-confirming",
+                    f"asserts the stubbed return of mock `{target}` (set on line {mocks[target]}) instead of code under test",
+                    "call the real unit that consumes the mock and assert its output or the mock's received arguments",
+                ))
+
+        m_if = re.match(r"^\s*(?:\}\s*)?if\s*(?:\(|let\b|[A-Za-z_!])", raw) if suffix in core.JS or suffix == ".rs" else None
+        if not m_if or re.match(r"^\s*\}?\s*else\b", raw) or not look(number):
+            continue
+        if suffix == ".rs" and re.match(r"^\s*if\s+let\b", raw):
+            continue  # `if let` handled by _check_multiline_and_bounds
+        end_if = _block_end_brace(lines, number, suffix)
+        if end_if <= number and "{" not in raw:
+            continue
+        inner = "\n".join(lines[number - 1:end_if])
+        after_close = lines[end_if - 1] if end_if <= len(lines) else ""
+        nxt = lines[end_if] if end_if < len(lines) else ""
+        has_else = bool(re.search(r"\}\s*else\b", after_close)) or bool(re.match(r"^\s*else\b", nxt))
+        early_exit = bool(re.search(r"\b(?:return|throw|fail\s*\(|panic!|unreachable!)", inner))
+        if not has_else and not early_exit and re.search(assert_re, inner):
+            out.append(core.Finding(
+                rel, number, "self-confirming",
+                "conditional `if` wraps assertion without `else`: when the condition is false the test passes silently",
+                "assert the condition itself first, or move the assertion out of the `if`",
+            ))
+
+
 ECHO_CTOR_ALLOW = {"new", "from", "to_string", "to_owned", "clone", "into", "vec",
                    "String", "Vec", "Object", "Array", "Number", "Boolean"}
 
@@ -558,7 +622,20 @@ def _check_python_ast(rel, source, lines, look, out):
                         local_containers[tgt.id] = stmt.lineno
                     elif isinstance(tgt, ast.Attribute) and tgt.attr == "return_value" and isinstance(tgt.value, ast.Name):
                         mock_returns[tgt.value.id] = stmt.lineno
+                    elif (isinstance(tgt, ast.Name) and isinstance(stmt.value, ast.Call)
+                          and (getattr(stmt.value.func, "id", None) or getattr(stmt.value.func, "attr", None))
+                          in ("Mock", "MagicMock", "AsyncMock", "create_autospec")
+                          and any(kw.arg in ("return_value", "side_effect") for kw in stmt.value.keywords)):
+                        mock_returns[tgt.id] = stmt.lineno
                 elif isinstance(stmt, ast.If):
+                    body_asserts = any(isinstance(x, ast.Assert) for s in stmt.body for x in ast.walk(s))
+                    early_exit = any(isinstance(x, (ast.Return, ast.Raise)) for s in stmt.body for x in ast.walk(s))
+                    if body_asserts and not stmt.orelse and not early_exit and look(stmt.lineno):
+                        out.append(core.Finding(
+                            rel, stmt.lineno, "self-confirming",
+                            "conditional `if` wraps assertion without `else`: when the condition is false the test passes silently",
+                            "assert the condition itself first, or move the assertion out of the `if`",
+                        ))
                     record_calls(stmt.test)
                     visit_stmts(stmt.body)
                     visit_stmts(stmt.orelse)
@@ -727,6 +804,8 @@ def raw_scan_file(path, only=None, checks=None, include_baseline=True):
         for blk in blocks:
             _check_multiline_and_bounds(rel, lines, suffix, blk, look, raw_out)
             _check_rust_js_echo(rel, lines, suffix, blk, look, raw_out)
+            if suffix in core.JS or suffix == ".rs":
+                _check_mock_echo_and_silent_if(rel, lines, suffix, blk, look, raw_out)
 
     for blk in blocks:
         if "undesirable" in wanted:
@@ -850,6 +929,8 @@ def selftest():
             "no reason",
             "repeat `clone_case_1` structure",
             "test setup",
+            "stubbed return of mock `rates.fetch`",
+            "conditional `if` wraps assertion",
         ):
             if needed not in rs_bad:
                 problems.append(f"bad_tests.rs missing expected finding {needed!r}:\n{rs_bad}")
@@ -866,6 +947,8 @@ def selftest():
             "wall-clock sleep",
             "swallows failure",
             "repeat `test_parse_case_a` structure",
+            "asserts directly on mock `rate` return_value",
+            "conditional `if` wraps assertion",
         ):
             if needed not in py_bad:
                 problems.append(f"test_bad.py missing expected finding {needed!r}:\n{py_bad}")
@@ -881,6 +964,8 @@ def selftest():
             "empty `catch {}`",
             "wall-clock sleep",
             "vacuous loop over `items`",
+            "stubbed return of mock `fetchRate`",
+            "conditional `if` wraps assertion",
         ):
             if needed not in js_bad:
                 problems.append(f"bad.test.ts missing expected finding {needed!r}:\n{js_bad}")

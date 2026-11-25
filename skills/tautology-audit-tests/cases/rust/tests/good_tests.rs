@@ -44,3 +44,20 @@ fn guards_is_ok_before_if_let() {
 #[test]
 fn single_line_helper_verify(){crate::verify_cases(&[1, 2]);}
 
+
+#[test]
+fn mock_through_unit() {
+    let mut rates = MockRates::new();
+    rates.expect_fetch().returning(|| 5);
+    assert_eq!(convert(10, &rates), 50);
+}
+
+#[test]
+fn both_branches_checked() {
+    let job = start_job();
+    if job.ready {
+        assert_eq!(job.result, 7);
+    } else {
+        assert_eq!(job.result, 0);
+    }
+}

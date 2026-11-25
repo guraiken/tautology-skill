@@ -85,3 +85,18 @@ fn setup_heavy_c() {
     let e = finalize_env(&d);
     assert!(run_gamma(&e).is_ready);
 }
+
+#[test]
+fn mock_echo_rate() {
+    let mut rates = MockRates::new();
+    rates.expect_fetch().returning(|| 5);
+    assert_eq!(rates.fetch(), 5);
+}
+
+#[test]
+fn only_when_ready() {
+    let job = start_job();
+    if job.ready {
+        assert_eq!(job.result, 7);
+    }
+}
