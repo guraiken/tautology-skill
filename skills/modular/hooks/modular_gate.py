@@ -1,12 +1,10 @@
-"""Hook of the modular skill: when a component is created or changed, or in a refactor, looks for the
-same code sequence copied in several places and tells the agent what to extract and where to.
+"""Hook of the modular skill: when a component is created or changed, or in a refactor, looks for
+copied sequences and structurally near-duplicate components, and tells the agent what to extract or unify.
 
-UserPromptSubmit: marks the session as a refactor when the request talks about refactoring,
-extracting, modularizing or reorganizing.
-Stop (called by the tautology skill's stop_gate.py): looks at the files the session edited (noted by
-the tautology skill's edit_gate.py, which also keeps the copy from before, so it knows a new file).
-A new pattern that touches those files sends the answer back once with the briefing.
-The hook does not edit code: the agent extracts, following the briefing.
+UserPromptSubmit / PreInvocation: marks session mode flags (.refactor, .design, .tests_audit) and
+injects a pre-creation reuse reminder when building/refactoring UI components or helpers.
+Stop (called by the tautology skill's stop_gate.py): inspects edited/created files for copied chains,
+blocks, duplicate UI helpers, near-duplicate parameterizable components, and smart reuse matches.
 """
 import hashlib
 import importlib.util
@@ -21,8 +19,14 @@ SKILL = HERE.parents[1]
 PLUGIN_ROOT = SKILL.parents[1]
 SELF_IMPROVE_FILE = PLUGIN_ROOT / "SELF_IMPROVE.local.md"
 EDIT_GATE = SKILL.parent / "tautology" / "hooks" / "edit_gate.py"
+
 SKILL_INVOKE = re.compile(r"(?i)(?:^|[\s/])(?:tautology(?:-debloat-design|-audit-tests)?|modular)\b")
-DEBLOAT = re.compile(r"(?i)(?:^|[\s/])(?:tautology-debloat-design|debloat[-_ ]design)(?:\s|$)|\bdebloat\b")
+DEBLOAT = re.compile(
+    r"(?i)(?:^|[\s/])(?:tautology-debloat-design|debloat[-_ ]design)(?:\s|$)|\b(?:debloat|de-?clutter)\b|"
+    r"\b(?:visual\s+(?:clutter|pollution|noise|audit|slop|inconsistenc\w*)|"
+    r"polui[çc][ãa]o\s+visual|ai[- ]?slop|v[íi]cios?\s+de\s+ia|"
+    r"(?:limp\w*|enxug\w*)\s+(?:a\s+)?(?:ui|interface|tela|visual|layout))\b"
+)
 DESIGN_FOLLOWUP = re.compile(
     r"(?i)\b(screen\w*|tela\w*|modal\w*|dialog\w*|di[áa]logo\w*|card\w*|cart[ãa]o\w*|cart[õo]es|"
     r"button\w*|bot[ãa]o|bot[õo]es|header\w*|cabe[çc]alho\w*|layout\w*|spacing|espa[çc]\w*|"
@@ -44,16 +48,35 @@ EXIT_TESTS = re.compile(
     r"(?i)(?:^|[\s/])(?:github-commit|ponytail|tautology-debloat-design)\b|"
     r"\b(?:git\s+(?:commit|push)|commitar|fazer\s+commit|pull\s+request|layout|tema|palette|css|tailwind)\b"
 )
-REFACTOR = re.compile(r"(?i)\b(refactor\w*|extract\w*|moduli[sz]\w*|reorgani[sz]\w*|componenti[sz]\w*|"
-                      r"refator\w*|extra(ir|ia|ção|cao)\w*|modulariz\w*|reorganiz\w*|componentiz\w*)")
+REFACTOR = re.compile(
+    r"(?i)\b(refactor\w*|extract\w*|moduli[sz]\w*|reorgani[sz]\w*|componenti[sz]\w*|dedup\w*|unif(?:y|ic\w*)|"
+    r"refator\w*|extra(ir|ia|ção|cao)\w*|modulariz\w*|reorganiz\w*|componentiz\w*)"
+)
+REFACTOR_FOLLOWUP = re.compile(
+    r"(?i)\b(refactor\w*|extract\w*|moduli[sz]\w*|dedup\w*|consolidat\w*|unif\w*|merge\w*|component\w*|"
+    r"shell|prop\w*|hook\w*|shared|helper\w*|refator\w*|extra\w*|modulariz\w*|reaproveit\w*|reutiliz\w*)\b"
+)
+EXIT_REFACTOR = re.compile(
+    r"(?i)(?:^|[\s/])(?:github-commit|ponytail|tautology-audit-tests)\b|"
+    r"\b(?:git\s+(?:commit|push)|commitar|fazer\s+commit|pull\s+request)\b"
+)
 BUILD_ARTIFACT = re.compile(
     r"(?i)\b(create|build|add|write|implement|make|new|cri[ae]\w*|constru\w*|adicion\w*|escrev\w*|implement\w*|fa(z|ça|ca)\w*|nov[oa]s?)\b"
-    r"[\s\S]{0,40}\b(component\w*|modal\w*|dialog\w*|di[áa]logo\w*|widget\w*|button\w*|bot[ãa]o\w*|card\w*|cart[ãa]o\w*|"
-    r"screen\w*|tela\w*|helper\w*|script\w*|util\w*|ferramenta\w*)\b"
+    r"[\s\S]{0,60}(?:"
+    r"\b(?:component\w*|modal\w*|dialog\w*|di[áa]logo\w*|widget\w*|button\w*|bot[ãa]o\w*|card\w*|cart[ãa]o\w*|cart[õo]es|"
+    r"screen\w*|tela\w*|helper\w*|script\w*|util\w*|ferramenta\w*|input\w*|search\w*|form\w*|toolbar\w*|"
+    r"table\w*|list\w*|panel\w*|drawer\w*|dropdown\w*|select\w*|filter\w*|header\w*|sidebar\w*|tabs?|"
+    r"menu\w*|popover\w*|hook\w*|field\w*|page\w*|view\w*|campo\w*|busca\w*|formul[áa]rio\w*|barra\w*|"
+    r"painel\w*|pain[ée]is|aba\w*|filtro\w*|tabela\w*|lista\w*|p[áa]gina\w*)\b"
+    r"|\w*(?:input|modal|dialog|card|toolbar|panel|drawer|dropdown|popover|sidebar|filter|form)\b)"
 )
 BUILD_TEST = re.compile(
     r"(?i)\b(create|build|add|write|implement|make|new|cri[ae]\w*|constru\w*|adicion\w*|escrev\w*|implement\w*|fa(z|ça|ca)\w*|nov[oa]s?)\b"
     r"[\s\S]{0,40}\b(tests?|specs?|testes?|su[íi]tes?)\b"
+)
+INFO_QUESTION = re.compile(
+    r"(?i)^\s*(?:what|why|how|where|when|which|who|does|do|is|are|explain|describe|"
+    r"o\s+que|por\s*que|como|onde|quando|qual|quais|quem|expli\w+|descrev\w+)\b"
 )
 
 
@@ -88,15 +111,17 @@ def reuse_reminder(repo):
     dests = _arch_destinations(repo)
     where = ", ".join(dests) if dests else "components/, scripts/, bin/, lib/ or utils/"
     return (
-        "Modular check (skill modular): before building a new component, modal, helper or script, ask yourself: "
-        f"does this already exist in the repository? Search the shared locations ({where}) first and reuse or "
-        "extend what is already there instead of creating a duplicate."
+        "Modular check (skill modular): before building a new component, modal, input, helper or script, "
+        f"search existing shared locations ({where}) by role stem (*Input, *Modal, *Card, *Toolbar) first; "
+        "reuse, extend via <=3 optional props/slots, or extract a shared shell instead of creating a near-duplicate."
     )
 
 
 SHELL_SCRIPT_EXTS = {".py", ".ps1", ".sh", ".bat", ".cmd"}
 JS_SCRIPT_EXTS = {".js", ".ts", ".mjs", ".cjs"}
 SCRIPT_DIRS = {"scripts", "bin"}
+JS_COMPAT_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+WEB_COMPAT_SUFFIXES = JS_COMPAT_SUFFIXES | {".vue", ".svelte"}
 
 
 def is_script(rel, suffix):
@@ -106,6 +131,15 @@ def is_script(rel, suffix):
         parts = {p.lower() for p in Path(rel).parts[:-1]}
         return bool(parts & SCRIPT_DIRS)
     return False
+
+
+def _expand_suffixes(touched_suffixes):
+    out = set(touched_suffixes)
+    if out & {".vue", ".svelte"}:
+        out |= WEB_COMPAT_SUFFIXES
+    elif out & JS_COMPAT_SUFFIXES:
+        out |= JS_COMPAT_SUFFIXES
+    return out
 
 
 APPROVAL = re.compile(
@@ -149,16 +183,17 @@ def main():
     is_skill_invoke = bool(SKILL_INVOKE.search(prompt))
     is_debloat = bool(DEBLOAT.search(prompt))
     is_tests_audit = bool(TESTS_AUDIT.search(prompt))
-    is_question = prompt.endswith("?") and not (is_skill_invoke or is_debloat or is_tests_audit)
-    is_build_test = (not is_question) and bool(BUILD_TEST.search(prompt))
-    is_refactor = ((not is_question) and bool(REFACTOR.search(prompt))) or is_debloat or is_tests_audit
-    is_build = (not is_question) and bool(BUILD_ARTIFACT.search(prompt))
+    is_info_question = (
+        prompt.endswith("?")
+        and bool(INFO_QUESTION.search(prompt))
+        and not (is_skill_invoke or is_debloat or is_tests_audit)
+    )
+    is_build_test = (not is_info_question) and bool(BUILD_TEST.search(prompt))
+    is_refactor = ((not is_info_question) and bool(REFACTOR.search(prompt))) or is_debloat
+    is_build = (not is_info_question) and bool(BUILD_ARTIFACT.search(prompt))
     _sync_mode_flag(design_flag, is_debloat, DESIGN_FOLLOWUP, EXIT_DESIGN, prompt)
     _sync_mode_flag(tests_flag, is_tests_audit or is_build_test, TESTS_FOLLOWUP, EXIT_TESTS, prompt)
-    if is_refactor or is_build:  # every request passes here: fast regex check
-        flag.write_text("1", encoding="utf-8")
-    elif flag.exists():
-        flag.unlink()
+    _sync_mode_flag(flag, is_refactor or is_build, REFACTOR_FOLLOWUP, EXIT_REFACTOR, prompt)
     digest = hashlib.sha1(prompt.encode("utf-8", errors="replace")).hexdigest()[:16] if prompt else ""
     already_reminded = prompt_stamp.is_file() and prompt_stamp.read_text(encoding="utf-8").strip() == digest
     if (is_refactor or is_build or is_build_test or is_skill_invoke) and digest and not already_reminded:
@@ -185,6 +220,12 @@ def main():
     if agy:
         print("{}")
     return 0
+
+
+def _shown_key(finding):
+    content = getattr(finding, "code", "") or ""
+    raw = f"{finding.path}:{finding.rule}:{finding.subject}:{content}"
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def stop_report(repo, session, state, gate, files=None):
@@ -230,19 +271,20 @@ def stop_report(repo, session, state, gate, files=None):
     if not touched:
         return None
     os.chdir(repo)
-    suffixes = {Path(rel).suffix for rel in touched}
-    found = patterns.findings(repo, arch, touched, suffixes)
+    suffixes = _expand_suffixes({Path(rel).suffix.lower() for rel in touched})
+    found, reuse_candidates = patterns.findings_and_reuse(repo, arch, touched, suffixes, created=created)
+    combined = found + reuse_candidates
     before = set(shown.read_text(encoding="utf-8").splitlines()) if shown.is_file() else set()
-    keyed = [(hashlib.sha1(f"{f.rule}:{f.subject}".encode()).hexdigest()[:16], f) for f in found]
-    new = [(k, f) for k, f in keyed if k not in before]
-    if not new:
+    keyed = [(_shown_key(f), f) for f in combined]
+    new_items = [(k, f) for k, f in keyed if k not in before]
+    if not new_items:
         return None
-    batch = new[:patterns.PER_ROUND]
+    batch = new_items[:patterns.PER_ROUND]
     with shown.open("a", encoding="utf-8") as handle:
         entries = [k for k, _ in batch]
         handle.write("\n".join(entries) + "\n")
     trigger = "; ".join(triggers[:3]) + (f" (+{len(triggers) - 3})" if len(triggers) > 3 else "")
-    return patterns.briefing([f for _, f in new], arch, trigger, created=created)
+    return patterns.briefing([f for _, f in new_items], arch, trigger, created=created)
 
 
 if __name__ == "__main__":
