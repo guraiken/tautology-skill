@@ -32,6 +32,44 @@ from answer_rules import *  # noqa: E402,F403
 
 COMPETENCIES = {"copy": "copy", "code": "code", "tests": "test", "answer": "answer"}
 
+_LEAN_DESIGN_FN = None
+_LEAN_DESIGN_CHECKED = False
+
+
+def _lean_design_scanner():
+    """Returns design_audit.scan_lean_design when available (canonical owner of [design] layout/slop rules)."""
+    global _LEAN_DESIGN_FN, _LEAN_DESIGN_CHECKED
+    loaded = sys.modules.get("design_audit")
+    if loaded is not None and hasattr(loaded, "scan_lean_design"):
+        return loaded.scan_lean_design
+    if not _LEAN_DESIGN_CHECKED:
+        _LEAN_DESIGN_CHECKED = True
+        da_path = HERE.parent / "tautology-debloat-design" / "design_audit.py"
+        if da_path.is_file():
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("_tautology_design_audit", da_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _LEAN_DESIGN_FN = getattr(mod, "scan_lean_design", None)
+            except Exception:
+                _LEAN_DESIGN_FN = None
+    return _LEAN_DESIGN_FN
+
+
+def _expand_only_for_jsx(raw_lines, norm_lines, only):
+    """If an edited line was absorbed into a multi-line JSX opening tag, mark its opening line edited too."""
+    if only is None:
+        return None
+    expanded = set(only)
+    for ln in only:
+        if 1 <= ln <= len(raw_lines) and raw_lines[ln - 1].strip() and not norm_lines[ln - 1]:
+            for back in range(ln - 1, 0, -1):
+                if norm_lines[back - 1]:
+                    expanded.add(back)
+                    break
+    return expanded
+
 
 def sibling_model_constants(path):
     """String constants in a sibling model.rs of the same screen folder (e.g. HINT_IDLE)."""
@@ -48,12 +86,13 @@ def sibling_model_constants(path):
     return out
 
 
-def scan_file(path, only=None, include_bloat=True):
+def scan_file(path, only=None, include_bloat=True, include_design=True):
     """only: lines to look at (None = all). Returns the findings, minus the accepted ones."""
-    return [f for f in raw_scan_file(path, only, include_bloat=include_bloat) if not accepted(f)]
+    return [f for f in raw_scan_file(path, only, include_bloat=include_bloat, include_design=include_design)
+            if not accepted(f)]
 
 
-def raw_scan_file(path, only=None, include_bloat=True):
+def raw_scan_file(path, only=None, include_bloat=True, include_design=True):
     rel = relative(path)
     suffix = path.suffix.lower()
     if suffix not in CODE | TEXT or C.skip_dirs & set(Path(rel).parts) or not path.is_file():
@@ -63,10 +102,13 @@ def raw_scan_file(path, only=None, include_bloat=True):
     if path.stat().st_size > MAX_BYTES:
         return []
     source = path.read_text(encoding="utf-8", errors="replace")
-    lines = source.splitlines()
+    raw_lines = source.splitlines()
+    lines = raw_lines
     if suffix in JSX:
-        lines = jsx_lines(lines)
-    skip = ignored_lines(lines)
+        norm = normalize_jsx_tags(raw_lines)
+        only = _expand_only_for_jsx(raw_lines, norm, only)
+        lines = jsx_lines(norm)
+    skip = ignored_lines(raw_lines)
     look = (lambda n: n not in skip) if only is None else (lambda n: n in only and n not in skip)
     out = []
     if suffix in TEXT:
@@ -135,7 +177,13 @@ def raw_scan_file(path, only=None, include_bloat=True):
     near_repeats(rel, ui_literals, out, lines, whole=only is None, repeated=repeated)
     if ui:
         bloat_checks(rel, lines, suffix, look, skip, test_from, out, full=include_bloat)
-        clutter_checks(rel, lines, suffix, look, skip, test_from, out)
+        lean_design = _lean_design_scanner() if include_design else None
+        clutter_checks(rel, lines, suffix, look, skip, test_from, out,
+                       include_layout_design=include_design and lean_design is None)
+        if lean_design is not None:
+            for finding in lean_design(path, rel, source, core.REPO):
+                if look(finding.line):
+                    out.append(finding)
     if suffix == ".rs" and (test or test_from):
         rust_test_checks(rel, lines, 1 if test else test_from, look, out)
     if suffix == ".py":
@@ -429,6 +477,155 @@ def hook_selftest():
         code, out = agy_hook("stop_gate.py", "Stop", transcriptPath=str(agy_transcript), continuationActive=True)
         if code != 0 or out != {}:
             problems.append(f"Antigravity continuationActive returned {code} {out!r}, expected empty object")
+
+        # Regression checks: core/copy/answer/test rules + hook safety & normalization
+        # 1. normalize_jsx_tags preserves 1-to-1 line count, catches Prettier nested cards, avoids multiline self-close FP
+        pretty_tsx = repo / "app" / "src" / "PrettyNested.tsx"
+        pretty_tsx.write_text(
+            'export const PrettyNested = ({ x }: Props): JSX.Element => {\n'
+            '  const [s, setS] = useState<\n'
+            '    string | null\n'
+            '  >(null);\n'
+            '  return (\n'
+            '    <div\n'
+            '      // outer card\n'
+            '      className={cn(\n'
+            '        "border rounded p-4",\n'
+            '        x && "bg-card"\n'
+            '      )}\n'
+            '    >\n'
+            '      <div\n'
+            '        className="border rounded p-4"\n'
+            '      >\n'
+            '        <div\n'
+            '          className="border rounded p-4"\n'
+            '        >\n'
+            '          <p>This page shows {x} saved reminders</p>\n'
+            '          <p>\n'
+            "            Don't forget to return back\n"  # tautology: example
+            '          </p>\n'
+            '          <span>✅</span>\n'
+            '        </div>\n'
+            '      </div>\n'
+            '    </div>\n'
+            '  );\n'
+            '};\n',
+            encoding="utf-8",
+        )
+        pretty_raw = pretty_tsx.read_text(encoding="utf-8").splitlines()
+        if len(normalize_jsx_tags(pretty_raw)) != len(pretty_raw):
+            problems.append("normalize_jsx_tags changed line count")
+        pretty_out = "\n".join(str(f) for f in raw_scan_file(pretty_tsx))
+        for needed in ("3 cards nested", "This page shows", "return back", "decorative emoji"):  # tautology: example
+            if needed not in pretty_out:
+                problems.append(f"PrettyNested.tsx missing {needed!r}:\n{pretty_out}")
+        selfclose_tsx = repo / "app" / "src" / "SelfCloseCards.tsx"
+        selfclose_tsx.write_text(
+            'export const SelfCloseCards = React.memo(({ items }: Props) => (\n'
+            '  <div>\n'
+            '    <Card\n'
+            '      title="One"\n'
+            '    />\n'
+            '    <Card\n'
+            '      title="Two"\n'
+            '    />\n'
+            '    <Card\n'
+            '      title="Three"\n'
+            '    />\n'
+            '  </div>\n'
+            '));\n',
+            encoding="utf-8",
+        )
+        sc_out = [str(f) for f in raw_scan_file(selfclose_tsx)]
+        if any("cards nested" in s for s in sc_out):
+            problems.append(f"multiline self-closing <Card /> triggered nested_cards FP: {sc_out!r}")
+
+        # 2. Hyphenated UI prose preserved, Tailwind utility skipped, PT FILLER strips verb, split_top quote-aware
+        for prose_line in ('const a = "Auto-save enabled";', 'const b = "Enter your e-mail address";'):
+            if not literals(prose_line, ".tsx"):
+                problems.append(f"JS literals() dropped hyphenated prose: {prose_line!r}")
+        if literals('const c = "flex items-center gap-2";', ".tsx"):
+            problems.append("JS literals() failed to skip Tailwind utility string")
+        if core_concepts("Digite seu telefone") != {"telefon"}:
+            problems.append(f"PT FILLER kept verb: {core_concepts('Digite seu telefone')!r}")
+        if split_top('"a, b", "c"') != ['"a, b"', '"c"']:
+            problems.append(f"split_top broke on comma inside quotes: {split_top('\"a, b\", \"c\"')!r}")
+
+        # 3. Python/Qt massive setToolTip caught; render_owner recognizes typed/memo/forwardRef; LEGAL narrows \d
+        qt_py = repo / "app" / "src" / "qt_tip.py"
+        qt_py.write_text(
+            'from PySide6.QtWidgets import QPushButton\n'
+            'def build():\n'
+            '    btn = QPushButton("Save")\n'
+            '    btn.setToolTip("This tooltip explains way too much across multiple sentences. It exceeds two balloon lines easily.")\n',
+            encoding="utf-8",
+        )
+        qt_out = "\n".join(str(f) for f in raw_scan_file(qt_py))
+        if "tooltip of ~" not in qt_out:
+            problems.append(f"Python/Qt tooltip_checks missed massive setToolTip:\n{qt_out}")
+        for hdr in (
+            "export const P = ({ x }: Props): JSX.Element => {",
+            "export const P = React.memo(({ x }: Props) => {",
+            "export const P = forwardRef<HTMLDivElement, Props>((p, r) => {",
+        ):
+            if render_owner([hdr, "  return <div />;"], 2) != (1, "P"):
+                problems.append(f"render_owner missed component header: {hdr!r}")
+        if LEGAL.search("Changes are saved every 5 seconds."):
+            problems.append("LEGAL regex still matches bare digit in non-legal footnote")
+
+        # 4. Partial limits merge, EN security populated, .agents without config.json does not shadow .claude/config.json
+        tmp_cfg = repo / "partial_cfg.json"
+        tmp_cfg.write_text('{"languages": ["en"], "limits": {"button": [5, 32, 1]}}', encoding="utf-8")
+        s_test = core.Settings()
+        s_test.load(tmp_cfg)
+        if not {"button", "title", "hint", "notice", "text"} <= set(s_test.limits):
+            problems.append(f"Settings.load partial limits clobbered defaults: {list(s_test.limits)!r}")
+        if s_test.security is None or not s_test.security.search("Your payment was declined"):
+            problems.append("EN-only Settings.security missing payment terms")
+        (repo / ".agents" / "tautology").mkdir(parents=True, exist_ok=True)
+        (repo / ".agents" / "tautology" / "accepted.txt").write_text("# empty\n", encoding="utf-8")
+        if core.config_file_for(repo, "tautology") != repo / ".claude" / "tautology" / "config.json":
+            problems.append(f"config_file_for shadowed .claude/config.json: {core.config_file_for(repo, 'tautology')}")
+
+        # 5. TIC_PROBLEM covers TICS.md rows 20-21 & modal cards; answer_rules inline triple backticks; Rust #[should_panic]
+        for tic_msg in (
+            "bar: 2 competing primary accents in one view (limit 1)",
+            "bar: stacked filter controls (2 trigger(s) + exposed filter-chip strip)",
+            "bar: fixed-width filter/sort trigger (175px) crowds toolbar",
+            "modal: inner boxed card inside a modal (nested surface)",
+            "view: overloaded hierarchy with 4 nested styled boxes (limit 3)",
+        ):
+            if not TIC_PROBLEM.search(tic_msg):
+                problems.append(f"TIC_PROBLEM missed {tic_msg!r}")
+        ans_hits = scan_message("```code```\nPlease return back.\n")  # tautology: example
+        if not ans_hits or ans_hits[0].line != 2:
+            problems.append(f"answer_rules failed after inline triple backticks: {[str(f) for f in ans_hits]!r}")
+        rs_sp_out = []
+        rust_test_checks("tests/sp.rs", [
+            "#[test]", "fn empty_test() {", "    let _x = 1;", "}",
+            "#[test]", "#[should_panic]", "fn expects_panic() {", "    explode();", "}",
+        ], 1, lambda n: True, rs_sp_out)
+        if len(rs_sp_out) != 1 or "empty_test" not in rs_sp_out[0].problem:
+            problems.append(f"rust_test_checks #[should_panic] misattributed check: {[str(f) for f in rs_sp_out]!r}")
+
+        # 6. edit_gate anchors relative paths when cwd is plugin/bin & tracks .css/.md; stop_gate respects USER_CANCELED
+        rel_css = repo / "app" / "src" / "panel.css"
+        rel_css.write_text(".p { color: #ff00aa; }\n", encoding="utf-8")
+        rel_run = subprocess.run(
+            [sys.executable, str(hooks / "edit_gate.py")],
+            input=json.dumps({
+                "hookEventName": "PreToolUse", "conversationId": "rel-check", "cwd": str(repo),
+                "toolCall": {"name": "edit_file", "args": {"Path": "app/src/panel.css"}},
+            }),
+            capture_output=True, text=True, encoding="utf-8", cwd=str(HERE.parents[1] / "bin"),
+        )
+        rel_files = repo / ".git" / "tautology" / "rel-check.files"
+        if rel_run.returncode != 0 or not rel_files.is_file() or "panel.css" not in rel_files.read_text(encoding="utf-8"):
+            problems.append("edit_gate failed to anchor relative .css path from plugin bin/")
+        (repo / ".git" / "tautology" / "agy-selftest.tics").write_text("app/src/screen2.rs\n", encoding="utf-8")
+        code, cancel_out = agy_hook("stop_gate.py", "Stop", continuationActive=True, terminationReason="USER_CANCELED")
+        if code != 0 or cancel_out != {}:
+            problems.append(f"stop_gate fought USER_CANCELED on continuation turn: {code} {cancel_out!r}")
     finally:
         shutil.rmtree(repo, ignore_errors=True)
     for problem in problems:

@@ -95,7 +95,7 @@ def ui_concepts(text):
 # tautology: off (the list quotes what the hunt looks for)
 FILLER = re.compile(r"(?i)\b(?:enter|type|insert|provide|select|choose|manage|update|edit|view|configure|"
                     r"tell us about)\s+(?:your|the|a)\b|\b(?:below|above|here|up to date|at any time)\b|"
-                    r"\b(digite|informe|insira|preencha|escolha|selecione|gerencie|atualize|edite|configure)\s+"
+                    r"\b(?:digite|informe|insira|preencha|escolha|selecione|gerencie|atualize|edite|configure)\s+"
                     r"(?:o|a|os|as|seu|sua|seus|suas)\b|\b(?:abaixo|acima|aqui|a qualquer momento)\b|"
                     r"\b(e-?mail|phone)\s+(?:address|number)\b|\b(?:endere[cç]o de|n[uú]mero de)\s+(e-?mail|telefone)\b")
 # tautology: on
@@ -277,9 +277,14 @@ def sentences(text):
 def render_owner(lines, number):
     """The function that holds the line (Rust fn, Python def, JS function or component): one screen."""
     for back in range(number - 1, -1, -1):
-        m = (re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|def)\s+(\w+)", lines[back])
+        m = (re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?(?:fn|def)\s+(\w+)", lines[back])
              or re.match(r"\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(\w+)", lines[back])
-             or re.match(r"\s*(?:export\s+)?(?:const|let)\s+([A-Z]\w*)\s*(?::[^=]+)?=\s*(?:\([^)]*\)|\w+)\s*=>", lines[back]))
+             or re.match(
+                 r"\s*(?:export\s+)?(?:default\s+)?(?:const|let)\s+([A-Z]\w*)\b[^=\n]*=\s*"
+                 r"(?:(?:React\.)?(?:memo|forwardRef)\s*(?:<[^>]*>)?\s*\(\s*)?"
+                 r"(?:(?:async\s+)?function\b|(?:async\s+)?(?:\([^)]*\)|\w+)\s*(?::[^=\n]+)?=>)",
+                 lines[back],
+             ))
         if m:
             return back + 1, m.group(1)
     return 0, "<file>"
@@ -421,6 +426,24 @@ def tooltip_finding(rel, number, text, out):
                            "only what the control does not show; the rest goes"))
 
 
+def _py_tooltip_text(lines, number, arg):
+    """Extracts the prose string passed to a Python tooltip call (literals or simple local variable)."""
+    parts = [m.group(1)[1:-1] for m in PY_STR.finditer(arg)]
+    if parts:
+        return PLACEHOLDER.sub("XXXXXX", "".join(parts))
+    name = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*", arg)
+    if name:
+        pat = re.compile(rf"^\s*{re.escape(name.group(1))}\s*=\s*(.+)$")
+        for idx in range(number - 2, max(-1, number - 42), -1):
+            m = pat.match(lines[idx])
+            if m:
+                val_parts = [pm.group(1)[1:-1] for pm in PY_STR.finditer(m.group(1))]
+                if val_parts:
+                    return PLACEHOLDER.sub("XXXXXX", "".join(val_parts))
+                break
+    return ""
+
+
 def tooltip_checks(rel, lines, suffix, look, skip, test_from, out):
     if suffix in JS:
         for number, line in enumerate(lines, 1):
@@ -431,6 +454,24 @@ def tooltip_checks(rel, lines, suffix, look, skip, test_from, out):
                     continue  # content= is a tooltip only inside <Tooltip>
                 text = re.sub(r"\$\{[^}]*\}", "X", m.group(2) or m.group(4))
                 if is_prose(text):
+                    tooltip_finding(rel, number, text, out)
+        return
+    if suffix == ".py":
+        for number, line in enumerate(lines, 1):
+            if number in skip or comment_of(line, suffix) is not None:
+                continue
+            for call in C.tooltip_call.finditer(line):
+                code, last = call_span(lines, number, call.end())
+                touched = set(range(number, last + 1))
+                if not any(look(n) for n in touched):
+                    continue
+                args = split_top(code.replace("\n", " "))
+                if not args:
+                    continue
+                second = any(name in call.group(0) for name in C.tooltip_second)
+                arg = args[1] if second and len(args) > 1 else args[0]
+                text = _py_tooltip_text(lines, number, arg)
+                if text and is_prose(text):
                     tooltip_finding(rel, number, text, out)
         return
     if suffix != ".rs":
@@ -474,7 +515,11 @@ ROW_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[-_.:/][a-z0-9]+)+$")
 ROW_STR_ARG = re.compile(r"^(?:Some\(\s*)?\"([^\"]{12,})\"")
 ROW_LABEL_THEN_NONE = re.compile(r"^\"[^\"]{1,60}\"\s*,\s*(?:None|null|undefined)\b")
 ROW_LABEL_THEN_HELPER = re.compile(r"^\"[^\"]{1,60}\"\s*,\s*(?:Some\(\s*)?\"([^\"]{12,})\"")
-EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-⛿✨⭐⭕‼⁉❗❓➡]")
+EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u26FF\u2705\u270F\u2728\u274C\u274E\u2753\u2757\u27A1\u2139\u2B50\u2B55\u203C\u2049]")
+SHORT_EMOJI_LIT = re.compile(
+    r"""(["'`])([^\n"'`]{0,4}[\U0001F300-\U0001FAFF\u2600-\u26FF\u2705\u270F\u2728\u274C\u274E\u2753\u2757\u27A1\u2139\u2B50\u2B55\u203C\u2049][^\n"'`]{0,4})\1"""
+    r"""|>\s*([\U0001F300-\U0001FAFF\u2600-\u26FF\u2705\u270F\u2728\u274C\u274E\u2753\u2757\u27A1\u2139\u2B50\u2B55\u203C\u2049]\uFE0F?)\s*<"""
+)
 
 
 def _row_helper(lines, number):
@@ -513,7 +558,7 @@ def _helper_after(lines, number, suffix):
     return None
 
 
-def clutter_checks(rel, lines, suffix, look, skip, test_from, out):
+def clutter_checks(rel, lines, suffix, look, skip, test_from, out, include_layout_design=True):
     """Screen-level AI tics: a helper text under (almost) every field, decorative emoji in UI text."""
     fields, helpers, emoji = defaultdict(list), defaultdict(list), defaultdict(list)
     for number, line in enumerate(lines, 1):
@@ -531,10 +576,17 @@ def clutter_checks(rel, lines, suffix, look, skip, test_from, out):
                 fields[owner].append(number)
                 if row_helper and is_prose(row_helper):
                     helpers[owner].append(number)
+        found_emoji = False
         for literal in literals(line, suffix):
             if EMOJI_RE.search(literal) and (suffix in JSX or on_screen(line, literal)):
                 emoji[owner].append(number)
+                found_emoji = True
                 break
+        if not found_emoji and SHORT_EMOJI_LIT.search(line):
+            m_em = SHORT_EMOJI_LIT.search(line)
+            em_text = m_em.group(2) or m_em.group(3) or ""
+            if suffix in JSX or on_screen(line, em_text):
+                emoji[owner].append(number)
     for (start, name), found in helpers.items():
         total = len(fields[(start, name)])
         if total >= 3 and len(found) >= max(3, -(-3 * total // 4)) and any(look(n) for n in found):
@@ -549,11 +601,12 @@ def clutter_checks(rel, lines, suffix, look, skip, test_from, out):
                                "drop them; where an icon carries meaning, use the project's icon component"))
 
     tooltip_everywhere(rel, lines, suffix, look, skip, test_from, out)
-    slop_badges(rel, lines, suffix, look, skip, test_from, out)
-    status_dots(rel, lines, suffix, look, skip, test_from, out)
     footnotes(rel, lines, suffix, look, skip, test_from, out)
-    if suffix in JSX:
-        nested_cards(rel, lines, look, skip, out)
+    if include_layout_design:
+        slop_badges(rel, lines, suffix, look, skip, test_from, out)
+        status_dots(rel, lines, suffix, look, skip, test_from, out)
+        if suffix in JSX:
+            nested_cards(rel, lines, look, skip, out)
 
 
 def _code_lines(lines, suffix, skip, test_from):
@@ -608,7 +661,8 @@ BADGE_OPEN = re.compile(r"<(?:Badge|Chip|Tag|Pill)\b|\b(?:badge|chip|tag|pill|st
 HYPE = re.compile(r"(?i)^\W*(?:new|novo|nova|beta|alpha|pro|ai|ia|hot|popular|recommended|recomendad[oa]|smart|"
                   r"premium|trending|exclusive|exclusivo|live|ao vivo|powered by \w+)\W*$")
 SLOP_LOOK = re.compile(r"bg-gradient|linear-gradient|gradient\(|animate-(?:pulse|ping)|uppercase[^\"']*tracking-|"
-                       r"tracking-\w+[^\"']*uppercase|^\s*[•●◉]|rounded-full\s+(?:h|w|size)-(?:1|1\.5|2)\b")
+                       r"tracking-\w+[^\"']*uppercase|^\s*[•●◉]|"
+                       r"(?:rounded-full[^\"']*\b(?:h|w|size)-(?:1|1\.5|2)\b|\b(?:h|w|size)-(?:1|1\.5|2)\b[^\"']*rounded-full)")
 
 
 def slop_badges(rel, lines, suffix, look, skip, test_from, out):
@@ -702,7 +756,7 @@ MUTED = re.compile(r"\.(?:muted|subtle|secondary|disabled)\b|muted|gray-[3-6]00|
 MUTED_TUPLE = re.compile(r"(?<![\w>!])\(\s*\"([^\"]{12,})\"(?:\.into\(\)|\.to_string\(\)|\.to_owned\(\))?\s*,\s*\w+\.muted\s*\)")
 SITE_FOOTER = re.compile(r"<footer\b|<Footer\b|role=[\"']contentinfo|\b(?:site_)?footer\s*\(")
 LEGAL = re.compile(r"(?i)©|\(c\)|copyright|cnpj|cpf|direitos reservados|rights reserved|privacidade|privacy|termos|terms|"
-                   r"cookies|ltda|inc\.|parcel|frete|shipping|\d")
+                   r"cookies|ltda|inc\.|parcel|frete|shipping|\$\s*\d|R\$\s*\d|€\s*\d|\b(?:19|20)\d{2}\b")
 CLOSER = re.compile(r"^\s*(?:</\w[\w.]*>\s*)+[)}]*[;,]?\s*$|^\s*[)}\]]+[;,]?\s*$")
 CONTENT = re.compile(r"\.child(?:ren)?\(|<\w|\b\w*(?:button|row|field|input|switch|card|list)\w*\s*\(", re.I)
 STATE = re.compile(r"^\s*(?:\}\s*else\s*)?if\b.*\{\s*$|\.when(?:_some)?\(|\.then\(|\{\s*\w[\w.!]*\s*&&\s*\(?\s*$|"
@@ -768,7 +822,7 @@ def footnotes(rel, lines, suffix, look, skip, test_from, out):
 BOX_TAG = re.compile(r"<(/?)(Card|Paper|Panel|div|section|article|aside)\b([^>]*?)(/?)>|<(Card|Paper|Panel|div|section|"
                      r"article|aside)\b([^>]*)$")
 LIST_ITEM = re.compile(r"\.(?:map|flatMap)\(|\bv-for=|\{#each\b")
-CARD_CLASS = re.compile(r"\b(?:border|shadow(?:-\w+)?|card|ring)\b(?!-0\b)")
+CARD_CLASS = re.compile(r"\b(?:border(?!-(?:0|none|transparent)\b)|shadow(?:-\w+)?|card|ring)\b(?!-0\b)")
 
 
 def nested_cards(rel, lines, look, skip, out):

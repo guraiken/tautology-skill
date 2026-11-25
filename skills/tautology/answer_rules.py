@@ -10,18 +10,22 @@ from copy_rules import text_checks
 def scan_message(text, label="answer"):
     """Repetition in the agent's answer: sentences and 8+ word passages said twice."""
     out, prose, fence = [], [], False
-    for line in text.splitlines():
-        if line.strip().startswith("```"):
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("```") and stripped.count("```") == 1:
             fence = not fence
             continue
         if not fence and not line.lstrip().startswith("|"):
-            prose.append(line)
-    body = re.sub(r"\]\([^)]*\)", "]", "\n".join(prose))
-    for number, line in enumerate(prose, 1):
+            prose.append((lineno, line))
+    cleaned_lines = []
+    for lineno, line in prose:
         line_clean = re.sub(r"\]\([^)]*\)", "]", line)
         # A quotation in quotes or backticks (a finding, an app text) is not the agent speaking.
         # Keep a non-word separator so adjacent words around inline code do not look doubled.
-        text_checks(label, number, re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " | ", line_clean), out)
+        unquoted = re.sub(r'`[^`]*`|"[^"]*"|“[^”]*”', " | ", line_clean)
+        text_checks(label, lineno, unquoted, out)
+        cleaned_lines.append(unquoted)
+    body = "\n".join(cleaned_lines)
     sentences = Counter(plain(s) for s in re.split(r"(?<=[.!?])\s+|\n+", body) if len(plain(s).split()) >= 6)
     for sentence, count in sentences.items():
         if count >= 2:

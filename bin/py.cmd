@@ -4,8 +4,20 @@ REM Runs a hook script with the first Python 3.10+ found on Windows. TAUTOLOGY_P
 REM No Python: the hook does nothing (exit 0), so it never blocks an edit, a prompt or an answer.
 REM The interpreter found is cached so hooks do not spawn a second probe process on every call.
 if defined TAUTOLOGY_PYTHON (
-  "%TAUTOLOGY_PYTHON%" %*
-  goto :done
+  if /i "%TAUTOLOGY_PYTHON%"=="py -3" (
+    py.exe -3 -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul
+    if not errorlevel 1 (
+      py.exe -3 %*
+      goto :done
+    )
+  ) else (
+    "%TAUTOLOGY_PYTHON%" -c "import sys; sys.exit(sys.version_info < (3, 10))" >nul 2>nul
+    if not errorlevel 1 (
+      "%TAUTOLOGY_PYTHON%" %*
+      goto :done
+    )
+  )
+  echo tautology plugin: TAUTOLOGY_PYTHON is not Python 3.10+; probing PATH >&2
 )
 set "CACHE_DIR=%LOCALAPPDATA%\tautology"
 if not defined LOCALAPPDATA set "CACHE_DIR=%TEMP%\tautology"
@@ -14,6 +26,7 @@ set "CACHED="
 if exist "%CACHE%" set /p CACHED=<"%CACHE%"
 if /i "%CACHED%"=="py -3" goto :run_cached_py
 if defined CACHED if exist "%CACHED%" goto :run_cached_exe
+if defined CACHED goto :stale
 goto :probe
 
 :run_cached_py
@@ -23,6 +36,7 @@ goto :done
 
 :run_cached_exe
 "%CACHED%" %*
+if errorlevel 9009 if not errorlevel 9010 goto :stale
 goto :done
 
 :stale

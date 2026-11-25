@@ -28,11 +28,20 @@ def project_subdir(repo, name):
     return agents if agents.is_dir() else Path(repo) / ".claude" / name
 
 
+def config_file_for(repo, name="tautology"):
+    """Per-project config.json: .agents/<name>/config.json if that file exists, else .claude/<name>/config.json."""
+    for folder in (".agents", ".claude"):
+        cfg = Path(repo) / folder / name / "config.json"
+        if cfg.is_file():
+            return cfg
+    return project_subdir(repo, name) / "config.json"
+
+
 REPO = find_repo()
 HERE = Path(__file__).resolve().parent
 CASES = HERE / "cases"                                   # the hunt's own test cases (--selftest)
 PROJECT_DIR = project_subdir(REPO, "tautology")          # per-project settings and accepted findings
-CONFIG_FILE = PROJECT_DIR / "config.json"
+CONFIG_FILE = config_file_for(REPO, "tautology")
 ACCEPTED_FILE = PROJECT_DIR / "accepted.txt"
 SELFTEST = False
 
@@ -42,13 +51,13 @@ def use_repo(repo):
     global REPO, PROJECT_DIR, CONFIG_FILE, ACCEPTED_FILE, _ACCEPTED
     REPO = Path(repo).resolve()
     PROJECT_DIR = project_subdir(REPO, "tautology")
-    CONFIG_FILE = PROJECT_DIR / "config.json"
+    CONFIG_FILE = config_file_for(REPO, "tautology")
     ACCEPTED_FILE = PROJECT_DIR / "accepted.txt"
     _ACCEPTED = None
     C.load(CONFIG_FILE)
 
-JS = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}
-JSX = {".jsx", ".tsx"}
+JS = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte"}
+JSX = {".jsx", ".tsx", ".vue", ".svelte"}
 CODE = {".py", ".rs", ".ps1", ".bat", ".cmd", ".sh"} | JS
 TEXT = {".md", ".txt"}
 SKIP_DIRS = {"target", "__pycache__", ".venv", "venv", "node_modules", "fixtures", ".git"}
@@ -75,10 +84,13 @@ LANG = {
         "condition": ["if", "when", "unless", "until", "before", "after"],
         "obvious": [r"click here", r"this (screen|page|section) (shows|lets|lists)", r"(?:pro )?tip\s*:",
                     r"note\s*:"],
-        "wordy": [r"allows you to", r"you can "],
+        "wordy": [r"allows you to", r"you can ", r"effortlessly", r"seamlessly", r"supercharge your",
+                  r"all-in-one", r"unlock the power"],
         "confirmation": [r"delete", r"remove", r"discard", r"undo\w*", r"permanent\w*", r"irreversib\w*",
                          r"can(?:not|'t) be (?:undone|reversed|recovered)"],
-        "security": [],
+        "security": [r"payment\w*", r"billing", r"invoice\w*", r"subscription\w*", r"refund\w*",
+                     r"charg\w*", r"terms?", r"privacy", r"guarante\w*", r"warrant\w*",
+                     r"purchase\w*", r"order\w*", r"checkout"],
         "doubled_ok": [],
         "endings": [],
     },
@@ -96,13 +108,13 @@ LANG = {
         "negation": ["nao", "nunca", "sem", "nenhum", "nenhuma", "jamais"],
         "condition": ["se", "quando", "ate", "antes d[eoa]s?", "depois d[eoa]s?", "caso", "enquanto", "exceto",
                       "salvo"],
-        "obvious": [r"dica\s*:", r"nota\s*:", r"clique (aqui|neste|nesse|no botão|em cima)", r"use (este|esse|o) (botão|campo)",
-                    r"n?(esta|essa) (tela|seção|página|aba|área|janela|lista) (mostra|exibe|lista|permite|serve|você)",
+        "obvious": [r"dica\s*:", r"nota\s*:", r"clique (aqui|neste|nesse|no bot[ãa]o|em cima)", r"use (este|esse|o) (bot[ãa]o|campo)",
+                    r"n?(esta|essa) (tela|se[çc][ãa]o|p[áa]gina|aba|[áa]rea|janela|lista) (mostra|exibe|lista|permite|serve|voc[êe])",
                     r"aqui (você|voce) (pode|vê|ve|encontra)", r"(você|voce) (encontra|vê|verá)",
                     r"basta (clicar|tocar)"],
-        "wordy": [r"permite que (você|voce)", r"(você|voce) (pode|poderá|consegue) ", r"é possível ", r"lembre-se",
-                  r"note que", r"observação:", r"de forma (fácil|rápida|simples)", r"facilmente", r"rapidamente",
-                  r"simplesmente", r"por favor"],
+        "wordy": [r"permite que (você|voce)", r"(você|voce) (pode|poderá|consegue) ", r"[ée] poss[íi]vel ", r"lembre-se",
+                  r"note que", r"observa[çc][ãa]o:", r"de forma (f[áa]cil|r[áa]pida|simples)", r"facilmente", r"rapidamente",
+                  r"simplesmente", r"por favor", r"tudo em um s[óo] lugar", r"sem complica[çc][õo]es"],
         "confirmation": [r"apagar", r"excluir", r"remover", r"descartar", r"desfaz\w*", r"de vez",
                          r"permanente\w*", r"irrevers\w*", r"não (dá|da|pode) (para )?(voltar|desfazer)"],
         "security": [r"pix", r"pagamento", r"pagar", r"pedido", r"compra", r"cobran\w*", r"confirma\w*", r"termos?"],
@@ -244,7 +256,12 @@ class Settings:
         raw = dict(DEFAULTS)
         self.path = Path(path)
         if self.path.is_file():
-            raw.update(json.loads(self.path.read_text(encoding="utf-8")))
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    raw.update(loaded)
+            except (OSError, ValueError) as err:
+                print(f"tautology config warning ({self.path}): {err}", file=sys.stderr)
         self.raw = raw
         langs = [l for l in raw["languages"] if l in LANG] or DEFAULTS["languages"]
         self.languages = langs
@@ -272,7 +289,9 @@ class Settings:
         self.test_paths = tuple(raw["test_paths"])
         self.skip_dirs = SKIP_DIRS | set(raw["skip_dirs"])
         self.sensitive_paths = tuple(raw["sensitive_paths"])
-        self.limits = {k: tuple(v) for k, v in raw["limits"].items()}
+        limits = dict(DEFAULTS["limits"])
+        limits.update(raw.get("limits") or {})
+        self.limits = {k: tuple(v) for k, v in limits.items()}
         self.line_chars, self.tooltip_lines = raw["tooltip_line_chars"], raw["tooltip_lines"]
         self.density, self.descriptive = raw["density"], raw["descriptive_words"]
         self.hook_scan_answer = bool(raw.get("hook_scan_answer", False))
@@ -355,8 +374,21 @@ def report_lines(findings):
 # ----------------------------------------------------------------------------- AI visual tics
 # A tic finding asks for a rebuild, not a deletion: the report adds the screen's own vocabulary and the
 # file is remembered, so the lines that fix it are checked for hardcoded styles.
-TIC_PROBLEM = re.compile(r"carry a helper text|decorative emoji|decorative badges|decorative status dot|: footnote \"|"
-                         r"tooltip or info icon|cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards")
+TIC_PROBLEM = re.compile(
+    r"carry a helper text|decorative emoji|decorative badges|decorative status dot|: footnote \"|"
+    r"tooltip or info icon|cards nested|dividers/separators|badges/chips|info_hint badges|boxed cards|"
+    r"competing primary accents|stacked filter controls|exposed filter/sort dropdowns|"
+    r"fixed-width filter/sort trigger|inner boxed card inside a modal|overloaded hierarchy|"
+    r"composed hierarchy|decorative glassmorphism|gradient text|pill soup|pulsing status"
+)
+DESIGN_LAYOUT_PROBLEM = re.compile(
+    r"cards nested|decorative badges|decorative status dot|dividers/separators|badges/chips|"
+    r"info_hint badges|boxed cards|competing primary accents|stacked filter controls|"
+    r"exposed filter/sort dropdowns|fixed-width filter/sort trigger|inner boxed card inside a modal|"
+    r"overloaded hierarchy|composed hierarchy|explicit spacer boxes|stacked text blocks|"
+    r"repeated inline style pattern|decorative glassmorphism|gradient text|pill soup|pulsing status|"
+    r"competing HEADLINE"
+)
 TICS = []  # paths with a tic reported in this hook run (hunt and design audit share this module)
 
 
@@ -547,8 +579,9 @@ def accept(finding_line, reason, store=None, tool="hunt.py", repo=None):
         return 2
     rule, subject = rule_and_subject(problem)
     target_path = m.group("path")
+    owner_tool = "design_audit.py" if (m.group("kind") == "design" and DESIGN_LAYOUT_PROBLEM.search(problem)) else tool
     entry = "\t".join([target_path, rule, subject, reason.strip().replace("\t", " "),
-                       datetime.date.today().isoformat(), tool])
+                       datetime.date.today().isoformat(), owner_tool])
     store.parent.mkdir(parents=True, exist_ok=True)
     header = f"# Judged false positives: path, rule, subject, reason, date, tool. Written by {tool} --accept."
     if store.is_file():
@@ -693,6 +726,30 @@ def is_prose(literal):
 
 # ------------------------------------------------------------------------ reading code
 CSS_LINE = re.compile(r"(?:^|[{;\s])[a-z-]+\s*:\s*[^;:]*;|^\s*[.#]?[\w-]+\s*\{")
+_TW_TOKEN = re.compile(
+    r"^(?:flex|grid|block|inline|hidden|relative|absolute|fixed|sticky|contents|table|"
+    r"(?:p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|w|h|min-w|max-w|min-h|max-h|size|gap|space-[xy]|"
+    r"text|font|leading|tracking|bg|from|via|to|border|divide|ring|outline|rounded|shadow|opacity|"
+    r"items|justify|content|self|place|overflow|cursor|select|pointer-events|z|inset|top|right|bottom|left|"
+    r"col-span|row-span|grid-cols|grid-rows|shrink|grow|basis|order|transition|duration|ease|animate|backdrop|"
+    r"fill|stroke|sr-only|truncate|whitespace|break|line-clamp)-|(?:hover|focus|active|disabled|dark|sm|md|lg|xl|2xl|group-hover):)"
+)
+
+
+def _is_css_or_tw_string(val):
+    """True when a JS string literal looks like CSS classes/selectors or a kebab-id, not UI prose."""
+    if "-" not in val or not re.fullmatch(r"[\w:/\-\[\]. #>]+", val):
+        return False
+    parts = val.split()
+    if len(parts) == 1:
+        return True  # single kebab token: "btn-primary", "bg-card", "foo-bar"
+    if val[0] in ".#" or ">" in val:
+        return True  # CSS selector: ".a > .b-c"
+    if re.match(r"^[A-ZÀ-Ý]", val):
+        return False  # capitalized UI prose with a hyphen: "Auto-save enabled", "Enter your e-mail address"
+    tw_hits = sum(1 for tok in parts if _TW_TOKEN.match(tok))
+    kebab_hits = sum(1 for tok in parts if "-" in tok or ":" in tok)
+    return tw_hits >= 1 or kebab_hits >= 2
 
 
 def literals(line, suffix):
@@ -703,7 +760,7 @@ def literals(line, suffix):
     if suffix in JS:
         out = []
         for m in JS_STR.finditer(line):
-            if JS_CODE_ARG.search(line[:m.start()]) or re.fullmatch(r"[\w:/\-\[\]. #>]+", m.group(2)) and "-" in m.group(2):
+            if JS_CODE_ARG.search(line[:m.start()]) or _is_css_or_tw_string(m.group(2)):
                 continue  # className="flex gap-2", querySelector(".a b"): code
             if CSS_LINE.search(line):
                 continue  # font:600 11px "Segoe UI": CSS inside a string
@@ -712,15 +769,245 @@ def literals(line, suffix):
     return []
 
 
+_JSX_OPEN_TAG = re.compile(r"<([A-Za-z][\w.-]*)(?=[\s/>]|$)")
+_JSX_BEFORE_OK = re.compile(r"(?:^|[\s(\[{=,:?>&|!;]|\b(?:return|case|yield|await))$")
+
+
+def _strip_line_comment(line, in_block=False):
+    """Strips a trailing // comment outside quotes and block comments; returns (cleaned, in_block)."""
+    in_str, escape, i, n = None, False, 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_block:
+            if ch == "*" and i + 1 < n and line[i + 1] == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            in_str = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            if line[i + 1] == "/":
+                return line[:i].rstrip(), False
+            if line[i + 1] == "*":
+                in_block = True
+                i += 2
+                continue
+        i += 1
+    return line, in_block
+
+
+def _scan_jsx_open_state(line):
+    """Scans a line and returns (tag_open, in_str, in_block, brace_depth) at end of line."""
+    tag_open, in_str, in_block, brace_depth, escape = False, None, False, 0, False
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_block:
+            if ch == "*" and i + 1 < n and line[i + 1] == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            if line[i + 1] == "/":
+                break
+            if line[i + 1] == "*":
+                in_block = True
+                i += 2
+                continue
+        if ch in "\"'`":
+            in_str = ch
+            i += 1
+            continue
+        if tag_open:
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}" and brace_depth > 0:
+                brace_depth -= 1
+            elif brace_depth == 0:
+                if ch == "=" and i + 1 < n and line[i + 1] == ">":
+                    tag_open = False  # TS generic arrow <T>(...) =>
+                    i += 2
+                    continue
+                if ch == ">":
+                    tag_open = False
+            i += 1
+            continue
+        if ch == "<" and not line[i:].startswith(("</", "<!--", "<>")):
+            m = _JSX_OPEN_TAG.match(line, i)
+            if m and _JSX_BEFORE_OK.search(line[:i]):
+                tag_open = True
+                i = m.end()
+                continue
+        i += 1
+    return tag_open, in_str, in_block, brace_depth
+
+
+def normalize_jsx_tags(lines):
+    """Joins multi-line JSX opening tags (<Tag\\n  className="..."\\n>) onto their opening line,
+    replacing absorbed continuation lines with "" to preserve exact 1-to-1 line numbers."""
+    src = list(lines)
+    n = len(src)
+    out = list(src)
+    i = 0
+    while i < n:
+        line = out[i]
+        tag_open, in_str, in_block, brace_depth = _scan_jsx_open_state(line)
+        if not tag_open:
+            i += 1
+            continue
+        head_clean, blk = _strip_line_comment(line)
+        parts = [head_clean.rstrip()]
+        close_j, close_pos = None, None
+        max_j = min(n, i + 41)
+        for j in range(i + 1, max_j):
+            cur = out[j]
+            escape = False
+            k, m_len = 0, len(cur)
+            found_close = None
+            while k < m_len:
+                ch = cur[k]
+                if in_block:
+                    if ch == "*" and k + 1 < m_len and cur[k + 1] == "/":
+                        in_block = False
+                        k += 2
+                        continue
+                    k += 1
+                    continue
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == in_str:
+                        in_str = None
+                    k += 1
+                    continue
+                if ch == "/" and k + 1 < m_len:
+                    if cur[k + 1] == "/":
+                        break
+                    if cur[k + 1] == "*":
+                        in_block = True
+                        k += 2
+                        continue
+                if ch in "\"'`":
+                    in_str = ch
+                    k += 1
+                    continue
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}" and brace_depth > 0:
+                    brace_depth -= 1
+                elif brace_depth == 0:
+                    if ch == "=" and k + 1 < m_len and cur[k + 1] == ">":
+                        found_close = -1  # TS generic arrow, abort
+                        break
+                    if ch == ">":
+                        found_close = k
+                        break
+                k += 1
+            if found_close == -1:
+                break
+            if found_close is not None:
+                close_j, close_pos = j, found_close
+                prefix, _ = _strip_line_comment(cur[:close_pos + 1], blk)
+                piece = prefix.strip()
+                if piece:
+                    parts.append(piece)
+                break
+            cleaned, blk = _strip_line_comment(cur, blk)
+            piece = cleaned.strip()
+            if piece:
+                parts.append(piece)
+        if close_j is None:
+            i += 1
+            continue
+        joined = " ".join(parts)
+        joined = re.sub(r"\s+(/?)>", lambda m: (" />" if m.group(1) else ">"), joined)
+        remainder = out[close_j][close_pos + 1:]
+        for k in range(i + 1, close_j):
+            out[k] = ""
+        if not remainder.strip():
+            out[i] = joined
+            out[close_j] = ""
+            i = close_j + 1
+        elif _scan_jsx_open_state(remainder)[0]:
+            out[i] = joined
+            out[close_j] = remainder
+            i = close_j
+        else:
+            out[i] = joined + remainder
+            out[close_j] = ""
+            i = close_j + 1
+    return out
+
+
+def _strip_braces(text):
+    """Replaces balanced {...} interpolations inside JSX text with {x}."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "{":
+            if depth == 0:
+                out.append("{x}")
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _jsx_text_sub(match):
+    raw = match.group(1)
+    if "{" in raw:
+        stripped = _strip_braces(raw).strip()
+        # Require actual readable prose outside {...}, not pure JS expressions like >{items.map(...)}<
+        outside = re.sub(r"\{x\}", " ", stripped).strip()
+        if not outside or not re.search(r"[A-Za-zÀ-ú]", outside):
+            return match.group(0)
+        escaped = stripped.replace("\\", "\\\\").replace('"', '\\"')
+        return '>{"' + escaped + '"}<'
+    body = raw.strip()
+    if not body:
+        return match.group(0)
+    escaped = body.replace("\\", "\\\\").replace('"', '\\"')
+    return '>{"' + escaped + '"}<'
+
+
 def jsx_lines(lines):
-    """JSX: bare text between tags becomes a literal ({"Save"}), measured like quoted texts."""
-    out = list(lines)
-    for i, line in enumerate(lines):
-        line = re.sub(r">([^<>{}\n]*[A-Za-zÀ-ú][^<>{}\n]*)<", lambda m: '>{"' + m.group(1).strip() + '"}<'
-                      if m.group(1).strip() else m.group(0), line)
+    """JSX: normalizes multi-line opening tags and turns bare text between tags into quoted literals."""
+    out = normalize_jsx_tags(lines)
+    for i, line in enumerate(out):
+        if not line:
+            continue
+        line = re.sub(r">([^<>]*[A-Za-zÀ-ú][^<>]*)<", _jsx_text_sub, line)
         body = line.strip()
-        prev = next((l.strip() for l in reversed(lines[:i]) if l.strip()), "")
-        if (body and re.search(r"[A-Za-zÀ-ú]", body) and not re.search(r"[<>{}=;()\"'`]", body)
+        prev = next((l.strip() for l in reversed(out[:i]) if l.strip()), "")
+        if (body and re.search(r"[A-Za-zÀ-ú]", body)
+                and not re.search(r"[<>{}=;\"`]|=>|\w\(", body)
                 and (prev.endswith(">") or prev.startswith('{"'))):
             line = line[:len(line) - len(line.lstrip())] + '{"' + body + '"}'
         out[i] = line
@@ -737,10 +1024,10 @@ def strip_literals(line):
 def comment_of(line, suffix):
     stripped = line.strip()
     marks = {".py": ("#",), ".sh": ("#",), ".ps1": ("#",), ".rs": ("//",),
-             ".bat": ("rem ", "::"), ".cmd": ("rem ", "::")}.get(suffix, ("//", "/*", "{/*", "* ") if suffix in JS else ())
+             ".bat": ("rem ", "::"), ".cmd": ("rem ", "::")}.get(suffix, ("//", "/*", "{/*", "* ", "<!--") if suffix in JS else ())
     for mark in marks:
         if stripped.lower().startswith(mark) or (mark == "* " and stripped == "*"):
-            text = re.sub(r"\s*\*/\}?$", "", stripped[len(mark):]).lstrip("/!#* ")
+            text = re.sub(r"\s*(?:\*/\}?|-->)$", "", stripped[len(mark):]).lstrip("/!#* ")
             if text.startswith(("noqa", "type:", "pylint", "!", "region", "endregion", "fmt:", "-*-")):
                 return None
             return text
@@ -748,8 +1035,28 @@ def comment_of(line, suffix):
 
 
 def split_top(args):
+    """Splits a top-level comma-separated argument list, respecting nested brackets and quoted strings."""
     depth, part, parts = 0, "", []
-    for c in args:
+    in_str, escape = None, False
+    n = len(args)
+    for i, c in enumerate(args):
+        if in_str:
+            part += c
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == in_str:
+                in_str = None
+            continue
+        if c in "\"`":
+            in_str = c
+            part += c
+            continue
+        if c == "'" and not (i > 0 and args[i - 1] in "&<") and not re.match(r"'[a-z_]\w*(?:\s+[A-Z_]|\s*[,>+)])", args[i:]):
+            in_str = "'"
+            part += c
+            continue
         if c in "([{":
             depth += 1
         elif c in ")]}":

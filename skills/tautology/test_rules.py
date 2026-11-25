@@ -36,7 +36,7 @@ RUST_LITERAL = re.compile(r'-?\d[\d_.]*\w*|"(?:[^"\\]|\\.)*"|true|false|\'.\'')
 JS_LET = re.compile(r"^\s*(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(.+?);?\s*$")
 
 
-JS_TEST = re.compile(r"^\s*(?:it|test)(?:\.\w+)?\(\s*[\"'\x60]")
+JS_TEST = re.compile(r"^\s*(?:it|test)(?:\.\w+)*\(\s*(?:[\"'\x60]|\[)")
 
 
 JS_LITERAL = re.compile(r"-?\d[\d_.]*n?|([\"'\x60])(?:(?!\1).)*\1|true|false|null|undefined")
@@ -120,7 +120,7 @@ def macro_args_js(line, start):
 def rust_test_checks(rel, lines, start, look, out):
     """Rust tests: the expected value is a variable the test built from the same expression, or a test without checks."""
     lets, count, since = {}, Counter(), {}
-    pending_test, opened, fn_name, checks = False, None, "", 0
+    pending_test, pending_should_panic, opened, fn_name, checks = False, False, None, "", 0
 
     def close():
         if opened and look(opened) and checks == 0:
@@ -133,7 +133,7 @@ def rust_test_checks(rel, lines, start, look, out):
             pending_test = True
             continue
         if re.match(r"^\s*#\[should_panic\b", line):
-            checks += 1
+            pending_should_panic = True
             continue
         fn_match = RUST_FN.match(line)
         if fn_match:
@@ -141,13 +141,13 @@ def rust_test_checks(rel, lines, start, look, out):
             lets, count, since = {}, Counter(), {}
             if pending_test:
                 opened, fn_name = number, fn_match.group(1)
-                checks = 1 if "->" in line else 0
+                checks = 1 if ("->" in line or pending_should_panic) else 0
                 brace = line.find("{")
                 if brace >= 0 and RUST_CHECK.search(line[brace:]):
                     checks += 1
             else:
                 opened, fn_name, checks = None, "", 0
-            pending_test = False
+            pending_test, pending_should_panic = False, False
             continue
         if opened and RUST_CHECK.search(line):
             checks += 1

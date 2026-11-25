@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/tautology/hooks/edit_gate.py\"'"
+            "command": "set _=' && \"%CLAUDE_PLUGIN_ROOT%\\bin\\py.cmd\" \"%CLAUDE_PLUGIN_ROOT%\\skills\\tautology\\hooks\\edit_gate.py\" & exit /b & rem ' ; exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/tautology/hooks/edit_gate.py\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/tautology/hooks/stop_gate.py\"'",
+            "command": "set _=' && \"%CLAUDE_PLUGIN_ROOT%\\bin\\py.cmd\" \"%CLAUDE_PLUGIN_ROOT%\\skills\\tautology\\hooks\\stop_gate.py\" & exit /b & rem ' ; exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/tautology/hooks/stop_gate.py\"",
             "timeout": 90
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/modular/hooks/modular_gate.py\"'"
+            "command": "set _=' && \"%CLAUDE_PLUGIN_ROOT%\\bin\\py.cmd\" \"%CLAUDE_PLUGIN_ROOT%\\skills\\modular\\hooks\\modular_gate.py\" & exit /b & rem ' ; exec sh \"$CLAUDE_PLUGIN_ROOT/bin/py.sh\" \"$CLAUDE_PLUGIN_ROOT/skills/modular/hooks/modular_gate.py\""
           }
         ]
       }

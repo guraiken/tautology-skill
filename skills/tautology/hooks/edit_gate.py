@@ -16,6 +16,8 @@ from pathlib import Path
 SCANNED_SUFFIXES = {
     ".py", ".rs", ".ps1", ".bat", ".cmd", ".sh",
     ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".css", ".scss", ".sass", ".less", ".qss",
+    ".md", ".txt",
 }
 MAX_BYTES = 1_500_000
 
@@ -51,9 +53,31 @@ def session_of(payload):
     return "".join(c for c in str(raw) if c.isalnum() or c in "-_")[:80]
 
 
-def repo_of(payload):
-    workspace = (payload.get("workspacePaths") or [None])[0]
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or workspace or ".")
+def repo_of(payload, target=None):
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir:
+        return Path(env_dir)
+    cwd = payload.get("cwd")
+    workspaces = [Path(w) for w in (payload.get("workspacePaths") or []) if w]
+    if target and workspaces:
+        tpath = Path(target)
+        if tpath.is_absolute():
+            try:
+                resolved = tpath.resolve()
+                for ws in workspaces:
+                    if resolved.is_relative_to(ws.resolve()):
+                        return ws
+            except OSError:
+                pass
+    if cwd:
+        return Path(cwd)
+    return workspaces[0] if workspaces else Path(".")
+
+
+def resolve_target(repo, target):
+    """Anchors relative tool paths to repo rather than the hook process cwd (which may be plugin/bin)."""
+    source = Path(target)
+    return source if source.is_absolute() else (Path(repo) / source)
 
 
 def target_of(payload):
@@ -104,14 +128,14 @@ def main():
         if is_antigravity(payload):
             print('{"decision": "allow"}')
         return 0
-    repo = repo_of(payload)
-    source = Path(target)
+    repo = repo_of(payload, target=target)
+    source = resolve_target(repo, target)
     if not should_track(repo, source):
         if is_antigravity(payload):
             print('{"decision": "allow"}')
         return 0
     state, session = state_dir(repo), session_of(payload)
-    snap = snapshot_of(state, session, target)
+    snap = snapshot_of(state, session, source)
     if not snap.exists():  # first edit of the file in this session: copy and note
         snap.parent.mkdir(parents=True, exist_ok=True)
         snap.write_bytes(source.read_bytes() if source.is_file() else b"")

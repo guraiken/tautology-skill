@@ -109,16 +109,21 @@ def last_answer(transcript):
     return "\n\n".join(t for t in texts if t.strip())
 
 
-def _config_flag(repo, key, default=False):
-    """Lightweight JSON read so fast-path Stop hooks can skip importing heavy modules."""
+def _load_project_config(repo):
+    """Lightweight JSON read so fast-path Stop hooks can check flags/paths without importing heavy modules."""
     for folder in (".agents", ".claude"):
         cfg = Path(repo) / folder / "tautology" / "config.json"
         if cfg.is_file():
             try:
-                return bool(json.loads(cfg.read_text(encoding="utf-8")).get(key, default))
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
             except (OSError, ValueError):
-                return default
-    return default
+                return {}
+    return {}
+
+
+def _config_flag(repo, key, default=False):
+    return bool(_load_project_config(repo).get(key, default))
 
 
 def _edited_files(state, session, repo):
@@ -178,11 +183,24 @@ UI_HINT = {  # Rust generics (Vec<String>) look like tags: only JS/TS reads tags
 }
 
 
-def _has_ui_candidate(files):
-    """Cheap pre-check before importing the layout audit: JSX/TSX, or a source that builds a screen."""
+STYLE_SUFFIXES = {".css", ".scss", ".sass", ".less", ".qss"}
+
+
+def _rel_posix(path, repo):
+    try:
+        return path.resolve().relative_to(Path(repo).resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _has_ui_candidate(files, repo=None):
+    """Cheap pre-check before importing the layout audit: JSX/TSX/CSS, configured ui_paths, or UI framework imports."""
+    ui_paths = tuple(_load_project_config(repo).get("ui_paths") or ()) if repo is not None else ()
     for path in files:
         suffix = path.suffix.lower()
-        if suffix in {".jsx", ".tsx", ".vue", ".svelte"}:
+        if suffix in {".jsx", ".tsx", ".vue", ".svelte"} | STYLE_SUFFIXES:
+            return True
+        if ui_paths and repo is not None and _rel_posix(path, repo).startswith(ui_paths):
             return True
         if suffix in UI_HINT:
             try:
@@ -196,15 +214,18 @@ def _has_ui_candidate(files):
 SKILL_NON_TEST = re.compile(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/test_(?:rules|audit)\.py$")
 
 
-def _has_test_candidate(files):
+def _has_test_candidate(files, repo=None):
+    test_paths = tuple(_load_project_config(repo).get("test_paths") or ()) if repo is not None else ()
     for path in files:
         if SKILL_NON_TEST.search(path.as_posix()):
             continue
+        if test_paths and repo is not None and _rel_posix(path, repo).startswith(test_paths):
+            return True
         name = path.name.lower()
         parts = {p.lower() for p in path.parts}
         if ({"tests", "test", "__tests__"} & parts
                 or name.startswith("test_")
-                or name.endswith(("_test.py", "_test.rs", ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+                or name.endswith(("_test.py", "_test.rs", "_tests.rs", ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
                                   ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"))):
             return True
         if path.suffix.lower() == ".rs":
@@ -216,7 +237,7 @@ def _has_test_candidate(files):
     return False
 
 
-def stop_report(payload, repo, session, state, files=None, design_mode=False):
+def stop_report(payload, repo, session, state, files=None, design_mode=False, include_design=True):
     """The text that sends the answer back to the agent, or None when nothing new was found."""
     shown = state / f"{session}.shown"
     if files is None:
@@ -251,7 +272,7 @@ def stop_report(payload, repo, session, state, files=None, design_mode=False):
         snap = gate.snapshot_of(state, session, path)
         only = gate.new_lines(snap, path) if snap.is_file() else hunt.added_lines(path)
         if only is None or only:
-            findings += hunt.scan_file(path, only, include_bloat=include_bloat)
+            findings += hunt.scan_file(path, only, include_bloat=include_bloat, include_design=include_design)
             if review_ui:
                 sibling_moved = Counter()
                 if removed_by_file:
@@ -344,17 +365,20 @@ def main():
     payload = json.load(sys.stdin)
     agy = gate.is_antigravity(payload)
     reason = payload.get("terminationReason")
-    if (gate.event_of(payload) != "Stop" or payload.get("stop_hook_active") or payload.get("continuationActive")
-            or (reason and reason != "NO_TOOL_CALL")):
-        if gate.event_of(payload) == "Stop" and (payload.get("stop_hook_active") or payload.get("continuationActive")):
-            # The fix made after a block is not judged again, now or in a later unrelated turn, except
-            # once: a tic fix that brought a hardcoded style.
-            repo = gate.repo_of(payload)
-            session, state = gate.session_of(payload), gate.state_dir(repo)
-            changed = _changed_since_last_stop(_edited_files(state, session, repo), state, session, repo)
-            report = _tic_fix_report(repo, session, state, changed)
-            if report:
-                return _deliver(report, agy)
+    normal_end = not (reason and reason != "NO_TOOL_CALL")
+    if gate.event_of(payload) != "Stop" or not normal_end:
+        if agy:
+            print("{}")
+        return 0
+    if payload.get("stop_hook_active") or payload.get("continuationActive"):
+        # The fix made after a block is not judged again, now or in a later unrelated turn, except
+        # once: a tic fix that brought a hardcoded style.
+        repo = gate.repo_of(payload)
+        session, state = gate.session_of(payload), gate.state_dir(repo)
+        changed = _changed_since_last_stop(_edited_files(state, session, repo), state, session, repo)
+        report = _tic_fix_report(repo, session, state, changed)
+        if report:
+            return _deliver(report, agy)
         if agy:
             print("{}")
         return 0
@@ -362,6 +386,7 @@ def main():
     session, state = gate.session_of(payload), gate.state_dir(repo)
     _cleanup_stale_state(state, session)
     (state / f"{session}.ticfix").unlink(missing_ok=True)  # a new answer: its tic fix may be checked once
+    (state / f"{session}.tics").unlink(missing_ok=True)    # scope tic-fix verification to this turn only
     files = _changed_since_last_stop(_edited_files(state, session, repo), state, session, repo)
     if not files and not _config_flag(repo, "hook_scan_answer", False):
         if agy:
@@ -369,14 +394,19 @@ def main():
         return 0
     design_mode = (state / f"{session}.design").is_file()
     tests_mode = (state / f"{session}.tests_audit").is_file()
-    reports = [stop_report(payload, repo, session, state, files=files, design_mode=design_mode)]
+    run_design = bool(files) and DESIGN_AUDIT.is_file() and (design_mode or _has_ui_candidate(files, repo))
+    design_mod = load("design_audit", DESIGN_AUDIT) if run_design else None
+    # When design_audit owns lean design checks via scan_lean_design, avoid double-reporting them in hunt.py.
+    hunt_include_design = not (design_mod is not None and hasattr(design_mod, "scan_lean_design"))
+    reports = [stop_report(payload, repo, session, state, files=files, design_mode=design_mode,
+                           include_design=hunt_include_design)]
     if files:
         if MODULAR.is_file():
             reports.append(load("modular_gate", MODULAR).stop_report(repo.resolve(), session, state, gate, files=files))
-        if DESIGN_AUDIT.is_file() and (design_mode or _has_ui_candidate(files)):
-            reports.append(load("design_audit", DESIGN_AUDIT).stop_report(
+        if design_mod is not None:
+            reports.append(design_mod.stop_report(
                 repo.resolve(), session, state, gate, files=files, lean=not design_mode))
-        if TEST_AUDIT.is_file() and (tests_mode or _has_test_candidate(files)):
+        if TEST_AUDIT.is_file() and (tests_mode or _has_test_candidate(files, repo)):
             reports.append(load("test_audit", TEST_AUDIT).stop_report(
                 repo.resolve(), session, state, gate,
                 only_new_tests=not tests_mode,
@@ -394,4 +424,9 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:  # a broken hook must never block or crash an answer
+        print(f"tautology stop_gate: {error}", file=sys.stderr)
+        print("{}")
+        sys.exit(0)

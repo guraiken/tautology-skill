@@ -43,7 +43,10 @@ SKIP_PY_RE = re.compile(r"@(?:pytest\.mark|unittest)\.skip(?:\(([^)]*)\))?")
 ONLY_JS_RE = re.compile(r"\b(?:it|test|describe)\.only\s*\(|\bf(?:it|describe)\s*\(")
 SKIP_JS_RE = re.compile(r"\b(?:it|test|describe)\.skip\s*\(")
 BUILTIN_IGNORE = {"open", "sleep", "time", "now", "today", "stdout", "stderr", "getenv", "print", "input", "random"}
-EMPTY_GUARD_TPL = r"(?:\b{col}\b\s*(?:\.\s*(?:is_empty|len|length)\b|==|!=)|\b(?:assert|expect)\w*!?\s*\([^;\n]*\b{col}\b)"
+EMPTY_GUARD_TPL = (
+    r"(?:\b{col}\b\s*(?:\.\s*(?:is_empty|len|length)\b|\s*(?:==|!=)\s*(?:\[\s*\]|0))|"
+    r"\b(?:assert|expect)\w*!?\s*\([^;\n]*\b{col}\b[^;\n]*(?:\.\s*(?:is_empty|len|length)\b|\.toHaveLength\b|\.toBeGreaterThan))"
+)
 
 
 @dataclass
@@ -165,6 +168,13 @@ def _extract_test_blocks(lines, suffix, is_test_file, test_from):
                 skipped = m.group(1) == "skip"
                 has_reason = _has_comment_above(lines, number, 2)
                 blocks.append(TestBlock(m.group(2), number, end, number + 1, skipped, has_reason))
+                continue
+            me = re.match(r"""^\s*(?:it|test)\.each\s*\(""", line)
+            if me:
+                end = _block_end_brace(lines, number, suffix)
+                span_hdr = " ".join(lines[number - 1:min(len(lines), number + 10)])
+                tm = re.search(r"""\)\s*\(\s*["'`]([^"'`]+)["'`]""", span_hdr)
+                blocks.append(TestBlock(tm.group(1) if tm else f"each@{number}", number, end, number + 1, False, False))
     return blocks
 
 
@@ -230,7 +240,7 @@ def _check_multiline_and_bounds(rel, lines, suffix, block, look, out):
                 continue
 
         if look(number):
-            if re.search(r"\bassert!\([^;\n]*\.len\(\)\s*>=\s*0\b|\bassert\s+len\([^)]+\)\s*>=\s*0\b|\bexpect\([^)]*\.length\)\.toBeGreaterThanOrEqual\(\s*0\s*\)", raw):
+            if suffix != ".py" and re.search(r"\bassert!\([^;\n]*\.len\(\)\s*>=\s*0\b|\bexpect\([^;\n]*\.length\)\.toBeGreaterThanOrEqual\(\s*0\s*\)", raw):
                 out.append(core.Finding(rel, number, "self-confirming", "length >= 0 is always true by type", "check exact length or > 0"))
 
             # Multi-line Rust assert_eq!/assert_ne!
@@ -322,6 +332,15 @@ def _check_multiline_and_bounds(rel, lines, suffix, block, look, out):
                 ))
 
 
+ECHO_CTOR_ALLOW = {"new", "from", "to_string", "to_owned", "clone", "into", "vec",
+                   "String", "Vec", "Object", "Array", "Number", "Boolean"}
+
+
+def _rhs_has_sut_call(code):
+    rhs = code.split("=", 1)[1] if "=" in code else ""
+    return any(c not in ECHO_CTOR_ALLOW for c in re.findall(r"\b([A-Za-z_]\w*)\s*\(", rhs))
+
+
 def _check_rust_js_echo(rel, lines, suffix, block, look, out):
     """Detects local struct/container construction asserted immediately with zero SUT calls in between."""
     locals_written = {}  # var -> (kind, line_set)
@@ -332,8 +351,9 @@ def _check_rust_js_echo(rel, lines, suffix, block, look, out):
         code = core.strip_literals(raw)
         if suffix == ".rs":
             lm = re.match(r"^\s*let\s+(?:mut\s+)?(\w+)\s*(?::[^=]+)?=\s*(?:vec!\[|Vec::new\(|(?:HashMap|BTreeMap)::new\(|([A-Z]\w*)\s*\{([^;]*)\});\s*$", code)
-            if lm and lm.group(2) not in (None, "Ok", "Some") or (lm and not lm.group(2)):
-                locals_written[lm.group(1)] = number
+            if lm and (lm.group(2) not in (None, "Ok", "Some") or not lm.group(2)):
+                if not _rhs_has_sut_call(code):
+                    locals_written[lm.group(1)] = number
                 continue
             pm = re.match(r"^\s*(\w+)\.(?:push|insert)\(", code)
             if pm and pm.group(1) in locals_written:
@@ -341,7 +361,8 @@ def _check_rust_js_echo(rel, lines, suffix, block, look, out):
         else:
             jm = re.match(r"^\s*(?:const|let)\s+(\w+)\s*=\s*(?:\{|\[)", code)
             if jm:
-                locals_written[jm.group(1)] = number
+                if not _rhs_has_sut_call(code):
+                    locals_written[jm.group(1)] = number
                 continue
         if look(number) and re.search(r"\b(?:assert\w*!|expect\()", raw):
             for var in list(locals_written):
@@ -358,8 +379,51 @@ def _check_rust_js_echo(rel, lines, suffix, block, look, out):
                         break
 
 
+def _is_len_ge_zero(expr):
+    """True for `len(...) >= 0` or `0 <= len(...)` (supports nested calls inside len())."""
+    if not isinstance(expr, ast.Compare) or len(expr.ops) != 1 or len(expr.comparators) != 1:
+        return False
+    op, left, right = expr.ops[0], expr.left, expr.comparators[0]
+    is_len = lambda n: isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "len"
+    is_zero = lambda n: isinstance(n, ast.Constant) and n.value == 0 and not isinstance(n.value, bool)
+    return (isinstance(op, ast.GtE) and is_len(left) and is_zero(right)) or (
+        isinstance(op, ast.LtE) and is_zero(left) and is_len(right)
+    )
+
+
+def _guarded_names_in_assert(expr):
+    """Names genuinely checked for non-emptiness/length/truthiness in a Python assert expression."""
+    out = set()
+    if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.And):
+        for v in expr.values:
+            out |= _guarded_names_in_assert(v)
+        return out
+    if isinstance(expr, ast.Name):
+        out.add(expr.id)
+        return out
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in ("len", "bool"):
+        if expr.args and isinstance(expr.args[0], ast.Name):
+            out.add(expr.args[0].id)
+        return out
+    if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and len(expr.comparators) == 1:
+        if _is_len_ge_zero(expr):
+            return out
+        op, left, right = expr.ops[0], expr.left, expr.comparators[0]
+        if isinstance(op, (ast.Is, ast.IsNot)):
+            return out  # `assert items is not None` does not guard against an empty list
+        for side in (left, right):
+            if isinstance(side, ast.Call) and isinstance(side.func, ast.Name) and side.func.id == "len":
+                if side.args and isinstance(side.args[0], ast.Name):
+                    out.add(side.args[0].id)
+            elif isinstance(side, ast.Name) and isinstance(op, (ast.Eq, ast.NotEq)):
+                other = right if side is left else left
+                if isinstance(other, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                    out.add(side.id)
+    return out
+
+
 def _check_python_ast(rel, source, lines, look, out):
-    """Deep AST audit for Python tests: try/except without fail, vacuous loop, local echo, mock self-patch, skip/sleep."""
+    """Deep AST audit for Python tests using ordered traversal: try/except, vacuous loop, local echo, mock self-patch."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -368,7 +432,6 @@ def _check_python_ast(rel, source, lines, look, out):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not node.name.startswith("test"):
             continue
         subj = re.sub(r"^test_+", "", node.name)
-        decs = [lines[d.lineno - 1].strip() for d in node.decorator_list]
         for dec in node.decorator_list:
             dec_src = ast.get_source_segment(source, dec) or ""
             pm = re.search(r"""\bpatch(?:\.object)?\(\s*(?:[^,]+,\s*)?["']([^"']+)["']""", dec_src)
@@ -380,78 +443,108 @@ def _check_python_ast(rel, source, lines, look, out):
                         f"`{node.name}` patches target `{target}` under test",
                         "test real logic and mock only external I/O boundaries",
                     ))
-        skip_m = next((SKIP_PY_RE.search(d) for d in decs if "skip" in d and "skipif" not in d), None)
-        if skip_m and "reason=" not in (skip_m.group(1) or "") and not _has_comment_above(lines, node.lineno, 2) and look(node.lineno):
-            out.append(core.Finding(rel, node.lineno, "undesirable", f"`{node.name}` skipped without reason", "fix or add explicit `reason=...`"))
 
-        # Track non-empty guarded names and local literals
         guarded = set()
         local_containers = {}  # name -> lineno
         passed_to_call = set()
         mock_returns = {}  # mock_name -> lineno
-        for sub in ast.walk(node):
-            ln = getattr(sub, "lineno", 0)
-            if isinstance(sub, ast.Assert):
-                txt = ast.get_source_segment(source, sub.test) or ""
-                if re.search(r"\blen\([^)]+\)\s*>=\s*0\b", txt) and look(ln):
-                    out.append(core.Finding(rel, ln, "self-confirming", "len() >= 0 is always true", "assert > 0 or exact count"))
-                for name_node in ast.walk(sub.test):
-                    if isinstance(name_node, ast.Name):
-                        guarded.add(name_node.id)
-                if isinstance(sub.test, ast.Compare) and len(sub.test.comparators) == 1:
-                    left_s = ast.get_source_segment(source, sub.test.left) or ""
-                    for container, c_ln in list(local_containers.items()):
-                        if re.match(rf"^{re.escape(container)}\[", left_s) and container not in passed_to_call and look(ln):
-                            out.append(core.Finding(rel, ln, "self-confirming", f"checks key/element written locally in `{container}` without calling code under test", "test real function output"))
-                            del local_containers[container]
-            elif isinstance(sub, ast.Try):
-                has_fail = any(
-                    re.search(r"\b(?:fail\(|pytest\.fail|assert\s+False|raise\b)", lines[s.lineno - 1])
-                    for s in sub.body
-                )
-                handler_asserts = any(
-                    isinstance(item, ast.Assert)
-                    for h in sub.handlers for item in ast.walk(h)
-                )
-                if handler_asserts and not has_fail and look(sub.lineno):
-                    out.append(core.Finding(
-                        rel, sub.lineno, "self-confirming",
-                        "`try/except` asserts inside `except` without failing if no exception is raised",
-                        "use `with pytest.raises(...)` or add unconditional failure at end of `try`",
-                    ))
-                for h in sub.handlers:
-                    if len(h.body) == 1 and isinstance(h.body[0], ast.Pass) and look(h.lineno):
-                        out.append(core.Finding(rel, h.lineno, "undesirable", "`except: pass` swallows failure inside test", "assert or handle explicit condition cleanly"))
-            elif isinstance(sub, ast.For):
-                has_assert = any(isinstance(x, ast.Assert) for x in ast.walk(sub))
-                if has_assert and isinstance(sub.iter, ast.Name) and sub.iter.id not in guarded and sub.iter.id not in local_containers and look(sub.lineno):
-                    out.append(core.Finding(
-                        rel, sub.lineno, "self-confirming",
-                        f"vacuous loop over `{sub.iter.id}`: if empty, loop asserts pass silently",
-                        f"assert `len({sub.iter.id}) > 0` before the loop",
-                    ))
-            elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
-                tgt = sub.targets[0]
-                if isinstance(tgt, ast.Name) and isinstance(sub.value, (ast.Dict, ast.List, ast.Set)):
-                    local_containers[tgt.id] = sub.lineno
-                elif isinstance(tgt, ast.Attribute) and tgt.attr == "return_value" and isinstance(tgt.value, ast.Name):
-                    mock_returns[tgt.value.id] = sub.lineno
-            elif isinstance(sub, ast.Call):
-                for arg in sub.args:
-                    if isinstance(arg, ast.Name):
-                        passed_to_call.add(arg.id)
-                call_src = ast.get_source_segment(source, sub) or ""
-                pm2 = re.search(r"""monkeypatch\.setattr\(\s*[^,]+,\s*["']([^"']+)["']""", call_src)
-                if pm2:
-                    t2 = pm2.group(1)
-                    if t2 not in BUILTIN_IGNORE and (subj == t2 or subj.startswith(t2 + "_")) and look(ln):
-                        out.append(core.Finding(rel, ln, "self-confirming", f"`{node.name}` monkeypatches target `{t2}` under test", "mock I/O dependency, not the function under test"))
-                if isinstance(sub.func, ast.Name) and sub.func.id in mock_returns and look(ln):
-                    # Direct call to mocked object itself inside assertion check
-                    for p in ast.walk(node):
-                        if isinstance(p, ast.Assert) and p.lineno == ln:
+
+        def record_calls(expr_node):
+            for sub in ast.walk(expr_node):
+                if isinstance(sub, ast.Call):
+                    for arg in sub.args:
+                        if isinstance(arg, ast.Name):
+                            passed_to_call.add(arg.id)
+                    for kw in sub.keywords:
+                        if isinstance(kw.value, ast.Name):
+                            passed_to_call.add(kw.value.id)
+                    if isinstance(sub.func, ast.Attribute) and isinstance(sub.func.value, ast.Name):
+                        if sub.func.attr not in ("append", "extend", "insert", "update", "setdefault", "get", "copy"):
+                            passed_to_call.add(sub.func.value.id)
+                    call_src = ast.get_source_segment(source, sub) or ""
+                    pm2 = re.search(r"""monkeypatch\.setattr\(\s*[^,]+,\s*["']([^"']+)["']""", call_src)
+                    if pm2:
+                        t2 = pm2.group(1)
+                        ln = getattr(sub, "lineno", 0)
+                        if t2 not in BUILTIN_IGNORE and (subj == t2 or subj.startswith(t2 + "_")) and look(ln):
+                            out.append(core.Finding(rel, ln, "self-confirming", f"`{node.name}` monkeypatches target `{t2}` under test", "mock I/O dependency, not the function under test"))
+
+        def visit_stmts(stmts):
+            for stmt in stmts:
+                ln = getattr(stmt, "lineno", 0)
+                if isinstance(stmt, ast.Assert):
+                    if _is_len_ge_zero(stmt.test) and look(ln):
+                        out.append(core.Finding(rel, ln, "self-confirming", "len() >= 0 is always true", "assert > 0 or exact count"))
+                    guarded.update(_guarded_names_in_assert(stmt.test))
+                    if isinstance(stmt.test, ast.Compare) and len(stmt.test.comparators) == 1:
+                        left_s = ast.get_source_segment(source, stmt.test.left) or ""
+                        for container in list(local_containers):
+                            if re.match(rf"^{re.escape(container)}\[", left_s) and container not in passed_to_call and look(ln):
+                                out.append(core.Finding(rel, ln, "self-confirming", f"checks key/element written locally in `{container}` without calling code under test", "test real function output"))
+                                del local_containers[container]
+                    for sub in ast.walk(stmt.test):
+                        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in mock_returns and look(ln):
                             out.append(core.Finding(rel, ln, "self-confirming", f"asserts directly on mock `{sub.func.id}` return_value", "call the real unit that uses the mock instead"))
                             break
+                    record_calls(stmt.test)
+                elif isinstance(stmt, ast.Try):
+                    has_fail = any(
+                        re.search(r"\b(?:fail\(|pytest\.fail|assert\s+False|raise\b)", lines[s.lineno - 1])
+                        for s in stmt.body
+                    )
+                    handler_asserts = any(
+                        isinstance(item, ast.Assert)
+                        for h in stmt.handlers for item in ast.walk(h)
+                    )
+                    if handler_asserts and not has_fail and look(stmt.lineno):
+                        out.append(core.Finding(
+                            rel, stmt.lineno, "self-confirming",
+                            "`try/except` asserts inside `except` without failing if no exception is raised",
+                            "use `with pytest.raises(...)` or add unconditional failure at end of `try`",
+                        ))
+                    visit_stmts(stmt.body)
+                    for h in stmt.handlers:
+                        if len(h.body) == 1 and isinstance(h.body[0], ast.Pass) and look(h.lineno):
+                            out.append(core.Finding(rel, h.lineno, "undesirable", "`except: pass` swallows failure inside test", "assert or handle explicit condition cleanly"))
+                        else:
+                            visit_stmts(h.body)
+                    visit_stmts(stmt.orelse)
+                    visit_stmts(stmt.finalbody)
+                elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                    has_assert = any(isinstance(x, ast.Assert) for x in ast.walk(stmt))
+                    if has_assert and isinstance(stmt.iter, ast.Name) and stmt.iter.id not in guarded and stmt.iter.id not in local_containers and look(stmt.lineno):
+                        out.append(core.Finding(
+                            rel, stmt.lineno, "self-confirming",
+                            f"vacuous loop over `{stmt.iter.id}`: if empty, loop asserts pass silently",
+                            f"assert `len({stmt.iter.id}) > 0` before the loop",
+                        ))
+                    record_calls(stmt.iter)
+                    visit_stmts(stmt.body)
+                    visit_stmts(stmt.orelse)
+                elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    record_calls(stmt.value)
+                    tgt = stmt.targets[0]
+                    if (isinstance(tgt, ast.Name) and isinstance(stmt.value, (ast.Dict, ast.List, ast.Set))
+                            and not any(isinstance(x, ast.Call) for x in ast.walk(stmt.value))):
+                        local_containers[tgt.id] = stmt.lineno
+                    elif isinstance(tgt, ast.Attribute) and tgt.attr == "return_value" and isinstance(tgt.value, ast.Name):
+                        mock_returns[tgt.value.id] = stmt.lineno
+                elif isinstance(stmt, ast.If):
+                    record_calls(stmt.test)
+                    visit_stmts(stmt.body)
+                    visit_stmts(stmt.orelse)
+                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                    for item in stmt.items:
+                        record_calls(item.context_expr)
+                    visit_stmts(stmt.body)
+                elif isinstance(stmt, ast.While):
+                    record_calls(stmt.test)
+                    visit_stmts(stmt.body)
+                    visit_stmts(stmt.orelse)
+                else:
+                    record_calls(stmt)
+
+        visit_stmts(node.body)
 
 
 def _check_undesirable_lines(rel, source, lines, suffix, block, look, out):
@@ -504,19 +597,21 @@ def _check_repetitive_tests(rel, lines, suffix, blocks, look, out):
 
     clustered = set()
     for i, (b_a, _, seq_a) in enumerate(normed):
-        if b_a.name in clustered:
+        key_a = (b_a.start, b_a.name)
+        if key_a in clustered:
             continue
         group = []
         for b_b, _, seq_b in normed[i + 1:]:
-            if b_b.name in clustered:
+            key_b = (b_b.start, b_b.name)
+            if key_b in clustered:
                 continue
             ratio = difflib.SequenceMatcher(None, seq_a, seq_b).ratio()
             if ratio >= 0.85:
                 group.append((b_b, int(round(ratio * 100))))
         if group:
-            clustered.add(b_a.name)
+            clustered.add(key_a)
             for b_b, _ in group:
-                clustered.add(b_b.name)
+                clustered.add((b_b.start, b_b.name))
             if look(b_a.start) or any(look(b.start) for b, _ in group):
                 names = ", ".join(b.name for b, _ in group[:3])
                 more = f" (+{len(group) - 3})" if len(group) > 3 else ""
@@ -528,21 +623,22 @@ def _check_repetitive_tests(rel, lines, suffix, blocks, look, out):
 
     # Detect 5+ identical setup lines copied across >= 3 non-clone tests in same file
     win = 5
-    windows = defaultdict(list)  # digest -> [(blk_name, first_line, sample)]
+    windows = defaultdict(list)  # digest -> [(blk_key, first_line, sample)]
     for blk, seq, _ in normed:
-        if blk.name in clustered:
+        blk_key = (blk.start, blk.name)
+        if blk_key in clustered:
             continue
         for idx in range(len(seq) - win + 1):
             chunk = [t for _, t in seq[idx:idx + win]]
             if any(re.search(r"\b(?:assert|expect)", t) for t in chunk):
                 continue
             digest = hashlib.sha1("\n".join(chunk).encode()).hexdigest()
-            windows[digest].append((blk.name, seq[idx][0], chunk[0]))
+            windows[digest].append((blk_key, seq[idx][0], chunk[0]))
     seen_lines = set()
     for sites in windows.values():
         distinct = {}
-        for name, ln, sample in sites:
-            distinct.setdefault(name, (ln, sample))
+        for blk_key, ln, sample in sites:
+            distinct.setdefault(blk_key, (ln, sample))
         if len(distinct) >= 3:
             first_ln, sample = next(iter(distinct.values()))
             if first_ln not in seen_lines and any(look(ln) for ln, _ in distinct.values()):
@@ -638,9 +734,10 @@ def _has_new_test(path, snap, only):
     if suffix == ".rs":
         return any(test_rules.RUST_TEST_ATTR.match(ln) for ln in added)
     if suffix == ".py" and is_t:
-        return any(re.match(r"^\s*(?:async\s+)?def\s+test_\w+\s*\(", ln) for ln in added)
+        return any(re.match(r"^\s*(?:async\s+)?def\s+test\w*\s*\(", ln) for ln in added)
     if suffix in core.JS and is_t:
-        return any(test_rules.JS_TEST.match(ln) or ONLY_JS_RE.search(ln) for ln in added)
+        return any(test_rules.JS_TEST.match(ln) or ONLY_JS_RE.search(ln)
+                   or re.match(r"^\s*(?:it|test)\.each\s*\(", ln) for ln in added)
     return False
 
 
@@ -902,6 +999,75 @@ def selftest():
         out_append = json.loads(r_append.stdout or "{}")
         if out_append.get("decision") != "continue" or "length >= 0" not in out_append.get("reason", ""):
             problems.append(f"stop_gate did not auto-trigger test_audit on newly added #[test]: {out_append!r}")
+
+        # Regression checks: ordered AST traversal, deduplicated Python len>=0 & skip, tightened guarded,
+        # SUT call inside JS object literal, duplicate JS test names across describe blocks, and test.each.
+        py_reg = repo / "py" / "test_regressions.py"
+        py_reg.write_text(
+            "import pytest\n\n"
+            "def test_valid_dict_passed_to_sut():\n"
+            '    payload = {"a": 1}\n'
+            "    mutate_in_place(payload)\n"
+            '    assert payload["a"] == 2\n\n'
+            "@pytest.mark.skip\n"
+            "def test_single_skip_and_len():\n"
+            "    items = get_items()\n"
+            "    assert len(items) >= 0\n"
+            "    assert len(get_items()) >= 0\n\n"
+            "def test_is_not_none_does_not_guard_loop():\n"
+            "    rows = fetch_rows()\n"
+            "    assert rows is not None\n"
+            "    for r in rows:\n"
+            "        assert r.ok\n",
+            encoding="utf-8",
+        )
+        reg_findings = scan_file(py_reg, only=None, include_baseline=False)
+        if any("payload" in f.problem for f in reg_findings):
+            problems.append(f"ordered AST FP on mutated local dict: {[str(f) for f in reg_findings]!r}")
+        skip_hits = [f for f in reg_findings if f.line == 9 and "skip" in f.problem]
+        if len(skip_hits) != 1:
+            problems.append(f"expected 1 skip finding on line 9, got {len(skip_hits)}: {[str(f) for f in skip_hits]!r}")
+        len_hits = [f for f in reg_findings if "len() >= 0" in f.problem or "length >= 0" in f.problem]
+        if len(len_hits) != 2 or {f.line for f in len_hits} != {11, 12}:
+            problems.append(f"expected 1 finding each on lines 11 & 12 for len>=0, got {[str(f) for f in len_hits]!r}")
+        if not any("vacuous loop over `rows`" in f.problem for f in reg_findings):
+            problems.append(f"`assert rows is not None` falsely silenced vacuous loop: {[str(f) for f in reg_findings]!r}")
+
+        js_reg = repo / "web" / "regressions.test.ts"
+        js_reg.write_text(
+            'describe("suite A", () => {\n'
+            '  it("computes field", () => {\n'
+            '    const res = { total: computeTotal(10) };\n'
+            '    expect(res.total).toBe(10);\n'
+            '  });\n'
+            '  it("same name", () => {\n'
+            '    const cfg = loadCfg();\n'
+            '    const tok = makeToken("a");\n'
+            '    const ses = openSession(cfg, tok);\n'
+            '    const out = runCase(ses, "x");\n'
+            '    expect(out.ok).toBe(true);\n'
+            '  });\n'
+            '});\n'
+            'describe("suite B", () => {\n'
+            '  it("same name", () => {\n'
+            '    const cfg = loadCfg();\n'
+            '    const tok = makeToken("b");\n'
+            '    const ses = openSession(cfg, tok);\n'
+            '    const out = runCase(ses, "y");\n'
+            '    expect(out.ok).toBe(true);\n'
+            '  });\n'
+            '});\n',
+            encoding="utf-8",
+        )
+        js_reg_findings = scan_file(js_reg, only=None, include_baseline=False)
+        if any("local literal/container `res`" in f.problem for f in js_reg_findings):
+            problems.append(f"JS object literal calling SUT triggered echo FP: {[str(f) for f in js_reg_findings]!r}")
+        if not any("repeat `same name` structure" in f.problem for f in js_reg_findings):
+            problems.append(f"duplicate test names across describe blocks collided in repetitive check: {[str(f) for f in js_reg_findings]!r}")
+        each_js = repo / "web" / "each_new.test.ts"
+        each_js.write_text('test.each([[1, 2]])("adds %i", (a, b) => {\n  expect(a + 1).toBe(b);\n});\n', encoding="utf-8")
+        if not _has_new_test(each_js, repo / "nonexistent.snap", {1, 2, 3}):
+            problems.append("_has_new_test missed test.each")
     finally:
         core.SELFTEST = False
         shutil.rmtree(repo, ignore_errors=True)

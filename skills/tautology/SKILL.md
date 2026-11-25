@@ -39,7 +39,7 @@ Here it is **a defect in any form**: UI text, test, component, script or the age
 
 `hunt.py` points at candidates; you decide, with the rules below. What it already understands:
 
-- **Programming languages:** Python, Rust, JS/TS and JSX/TSX. In JSX, text between tags counts as screen
+- **Programming languages:** Python, Rust, JS/TS, JSX/TSX, Vue and Svelte (plus stylesheets `.css`/`.scss`/`.qss` and prose `.md`/`.txt` tracked by hooks). In JSX, text between tags counts as screen
   text and `title=` as a tooltip; CSS classes, selectors and CSS in strings stay out. Jest/Vitest/node:test
   tests (`*.test.ts`, `__tests__/`) follow the test rules.
 - **Human languages:** English and Portuguese, both on by default. Narrow them in the project settings

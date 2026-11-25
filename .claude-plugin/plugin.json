@@ -1,12 +1,14 @@
 {
   "name": "tautology",
   "version": "1.0.0",
-  "description": "Hunts tautology in UI copy, tests, code and the agent's answers, and copied code sequences to extract by the codebase's architecture. Runs before each answer through a Stop hook.",
+  "description": "Hunts tautology in UI copy, tests, code and answers; modularizes copied/near-duplicate components; audits UI design bloat, AI visual tics and spacing (tautology-debloat-design); and audits self-confirming/flaky/repetitive tests (tautology-audit-tests). Runs before each answer through a Stop hook.",
   "keywords": [
     "tautology",
     "ux-writing",
     "tests",
     "refactoring",
+    "design-audit",
+    "modular",
     "hooks"
   ],
   "license": "MIT",
