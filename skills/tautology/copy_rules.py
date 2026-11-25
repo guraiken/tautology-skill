@@ -95,6 +95,9 @@ def ui_concepts(text):
 # tautology: off (the list quotes what the hunt looks for)
 FILLER = re.compile(r"(?i)\b(?:enter|type|insert|provide|select|choose|manage|update|edit|view|configure|"
                     r"tell us about)\s+(?:your|the|a)\b|\b(?:below|above|here|up to date|at any time)\b|"
+                    r"\b(?:this|here)\s+(?:is|are)\s+(?:your|the|all)\b|\bwelcome\s+to\s+(?:your|the)\b|"
+                    r"\b(?:esta|este|aqui)\s+(?:[ée]|est[áa]o?)\s+(?:a|o|as|os)?\s*(?:sua|seu|suas|seus)?\b|"
+                    r"\bbem-?vindo\s+(?:a|ao|à)\s+(?:sua|seu)?\b|"
                     r"\b(?:digite|informe|insira|preencha|escolha|selecione|gerencie|atualize|edite|configure)\s+"
                     r"(?:o|a|os|as|seu|sua|seus|suas)\b|\b(?:abaixo|acima|aqui|a qualquer momento)\b|"
                     r"\b(e-?mail|phone)\s+(?:address|number)\b|\b(?:endere[cç]o de|n[uú]mero de)\s+(e-?mail|telefone)\b")
@@ -128,6 +131,10 @@ def siblings(l1, t1, l2, t2):
     return bool(c1) and c1 == c2 and c1 not in GENERIC_CALLS
 
 
+HEADING_LINE = re.compile(
+    r"<h[1-6]\b|<(?:Title|Heading|CardTitle|DialogTitle|PageTitle|SheetTitle)\b|\.heading\(|\bHEADLINE\b"
+    r"|\b(?:title|heading)\s*[=:(]|\bsetWindowTitle\(|\bset_title\("
+)
 LABEL_LINE = re.compile(r"<label\b|<(?:Label|FormLabel)\b|\bQLabel\(|\.label\(|\blabel\s*=")
 PLACEHOLDER_ATTR = re.compile(r"(?i)\bplaceholder(?:Text)?\s*[=:(]|setPlaceholderText\(")
 SINK = re.compile(r"=\s*(?:format!\()?\s*[\"']|\bset_\w+\(|\bmessage\b")
@@ -152,8 +159,13 @@ def near_repeats(rel, ui_literals, out, lines=(), whole=False, repeated=()):
             suffix = Path(rel).suffix
             # A one-word label and the placeholder of its field ("Email" / "Enter your email address").
             labelled = n2 - n1 <= 2 and any(PLACEHOLDER_ATTR.search(l) for l in (l1, l2))
-            min_concepts = 4 if far else 1 if labelled else 2
+            # A one-word heading and the subtitle under it ("Dashboard" / "This is your dashboard").
+            titled = (not far and n2 - n1 <= 2 and len(a) == 1 and HEADING_LINE.search(l1) is not None
+                      and not HEADING_LINE.search(l2) and len(b) >= 1)
+            min_concepts = 4 if far else 1 if (labelled or titled) else 2
             if len(a) < min_concepts or len(b) < min_concepts:
+                continue
+            if titled and not labelled and not (a <= b and len(b - a) <= 1):
                 continue
             if not far and lines and alternatives(lines, n1, n2):
                 continue
@@ -172,7 +184,7 @@ def near_repeats(rel, ui_literals, out, lines=(), whole=False, repeated=()):
             elif ((a <= b or b <= a) and len(a ^ b) <= (2 if far else 3)) or (
                     far and len(a & b) >= 5 and len(a & b) / min(len(a), len(b)) >= 0.65):
                 same_words = {stem(w) for w in words(PLACEHOLDER.sub(" ", t1))} == {stem(w) for w in words(PLACEHOLDER.sub(" ", t2))}
-                if same_words:
+                if same_words and not titled:
                     continue  # singular/plural or another number in the same notice
                 short, long = (t1, t2) if len(a) <= len(b) else (t2, t1)
                 if new_information(t1, t2) if far else new_information(short, long):

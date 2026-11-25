@@ -135,7 +135,7 @@ def raw_scan_file(path, only=None, include_bloat=True, include_design=True):
         for literal in literals(line, suffix):
             if not is_prose(literal):
                 # A one-word label or placeholder still names its field: "Email" against "Enter your email".
-                if (ui and not test and (LABEL_LINE.search(line) or PLACEHOLDER_ATTR.search(line))
+                if (ui and not test and (LABEL_LINE.search(line) or PLACEHOLDER_ATTR.search(line) or HEADING_LINE.search(line))
                         and on_screen(line, literal) and re.fullmatch(r"[^\W\d_][\w-]{1,30}", literal.strip())):
                     ui_literals.append((number, literal, line))
                 continue

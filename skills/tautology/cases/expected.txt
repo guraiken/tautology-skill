@@ -11,8 +11,8 @@ app/src/explicacoes.rs:55 [copy] "Você pode" is wordy: "Você pode tentar de no
 app/src/explicacoes.rs:62 [copy] "Buscar tarefa no calendário" says the same as "Buscar no calendário" (line 61)
 app/src/rodape.rs:15 [design] render: footnote "As alterações são salvas automaticamente." under the content
 app/src/rodape.rs:21 [design] status: footnote "Atualização automática só no app instalado" under the content
-app/src/status.rs:8 [design] monitor_bar: decorative status dot
 app/src/status.rs:18 [design] status_chip: decorative status dot
+app/src/status.rs:8 [design] monitor_bar: decorative status dot
 app/src/tela.rs:13 [copy] "Clique aqui" explains the obvious: "Clique aqui para abrir as configurações "
 app/src/tela.rs:3 [copy] render: 7 explanatory texts on one screen (limit 5; lines 7, 8, 9, 10, 11, 12)
 app/src/tela.rs:5 [copy] title ends with a period: "Lembretes salvos."
@@ -53,6 +53,8 @@ web/Settings.tsx:6 [copy] title ends with a period: "Saved reminders."
 web/Settings.tsx:7 [copy] button with 8 words / 39 characters (limit 4 / 28): "Save all the changes you made right now"
 web/Settings.tsx:8 [copy] "Click here" explains the obvious: "Click here to open the settings of every"
 web/Settings.tsx:9 [copy] "This page shows" explains the obvious: "This page shows all of your saved remind"
+web/Titulos.tsx:14 [copy] "Esta é a sua página de relatórios" says the same as "Relatórios" (line 13)
+web/Titulos.tsx:5 [copy] "This is your dashboard" says the same as "Dashboard" (line 4)
 web/aviso.js:4 [copy] "Por favor" is wordy: "Por favor, aguarde enquanto as tarefas c"
 web/calc.test.ts:10 [test] checks the value the test itself wrote
 web/calc.test.ts:14 [test] checks a constant against itself
