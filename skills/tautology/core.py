@@ -1145,9 +1145,12 @@ def ignored_lines(lines):
     return skip
 
 
+_OWN_CASES_RE = re.compile(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/cases/")
+
+
 def own_cases(path, rel):
     """The skills' own bad-on-purpose cases stay out of every scan but the selftest."""
     return not SELFTEST and (
-        path.resolve().is_relative_to(CASES)
-        or bool(re.search(r"(^|/)(?:\.(?:claude|agents)/)?skills/[^/]+/cases/", rel))
+        bool(_OWN_CASES_RE.search(rel))
+        or path.resolve().is_relative_to(CASES)
     )

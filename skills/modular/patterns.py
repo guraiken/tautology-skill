@@ -335,12 +335,25 @@ def mask_for_braces(text, suffix=""):
     return rx.sub(_space_keep_nl, text)
 
 
+def _repo_near_cases(repo_resolved):
+    return any(
+        repo_resolved == c or repo_resolved.is_relative_to(c) or c.is_relative_to(repo_resolved)
+        for c in (CASES, core.CASES)
+    )
+
+
 def code_files(repo, arch, suffixes=None):
+    repo_resolved = Path(repo).resolve()
+    check_resolve = (not core.SELFTEST) and _repo_near_cases(repo_resolved)
+    allowed = suffixes or CODE
     for rel in tracked(repo):
         path = Path(rel)
-        if path.suffix not in (suffixes or CODE) or rel.endswith(".d.ts") or SKIP & set(path.parts) or arch.excluded(rel):
+        if path.suffix not in allowed or rel.endswith(".d.ts") or SKIP & set(path.parts) or arch.excluded(rel):
             continue
-        if _own_modular_case(repo, rel):
+        if check_resolve:
+            if _own_modular_case(repo, rel):
+                continue
+        elif not core.SELFTEST and core._OWN_CASES_RE.search(rel):
             continue
         if core.is_test(rel):
             continue
