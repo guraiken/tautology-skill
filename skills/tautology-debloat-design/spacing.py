@@ -1117,14 +1117,14 @@ def check(rel, lines, suffix, fn_of, look, steps, tokens):
         return rust_findings(rel, lines, fn_of, look, steps, tokens)
     if suffix in (".css", ".scss"):
         return css_findings(rel, lines, look, steps, tokens)
-    if suffix in core.JS:
-        return tailwind_findings(rel, lines, fn_of, look, steps, tokens)
     if suffix in MARKUP_EXT:
         out = tailwind_findings(rel, lines, fn_of, look, steps, tokens)
         style_lines = _sfc_style_lines(lines)
         if style_lines is not None:
             out += css_findings(rel, style_lines, look, steps, tokens)
         return out
+    if suffix in core.JS:
+        return tailwind_findings(rel, lines, fn_of, look, steps, tokens)
     if suffix == ".py":
         return qt_findings(rel, lines, fn_of, look, steps, tokens)
     return []
