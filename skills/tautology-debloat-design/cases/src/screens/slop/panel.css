@@ -1,0 +1,10 @@
+.panel {
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(24px);
+  box-shadow: 0 0 40px var(--glow);
+}
+.headline {
+  background: linear-gradient(90deg, var(--a), var(--b));
+  -webkit-background-clip: text;
+  color: transparent;
+}

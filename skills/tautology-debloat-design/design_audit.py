@@ -75,9 +75,10 @@ MICRO_RE = re.compile(
     r"|\bsize\(px\((?:[1-9]|1[0-9]|2[0-9]|3[0-6])\.?\)"
 )
 DIVIDER_RE = re.compile(
-    r"\b(?:divider|separator|row_separator)\s*\(|\bui\.separator\s*\(|<hr\b|<Divider\b|QFrame[\.:]+HLine|\.h\(px\([12]\.?\)\)"
+    r"\b(?:divider|separator|row_separator)\s*\(|\bui\.separator\s*\(|<hr\b|<Divider\b|<Separator\b|"
+    r"<(?:v|el|n|a|q)-(?:divider|separator)\b|QFrame[\.:]+HLine|\.h\(px\([12]\.?\)\)"
 )
-BADGE_RE = re.compile(r"\b(?:visual::tag|tag|badge|chip|status_pill)\s*\(|<(?:Badge|Chip|Tag)\b")
+BADGE_RE = re.compile(r"\b(?:visual::tag|tag|badge|chip|status_pill)\s*\(|<(?:Badge|Chip|Tag)\b|<(?:v|el|n|a|q|b)-(?:chip|tag|badge)\b")
 ICON_RE = re.compile(r"\b(?:visual::icon|icon)\s*\(|<(?:[A-Z]\w*Icon|Icon)\b")
 ICON_IMPORT_RE = re.compile(
     r"""import\s*\{([^}]+)\}\s*from\s*['"](?:lucide-react|@heroicons/[^'"]+|@radix-ui/react-icons|"""
@@ -94,6 +95,8 @@ PRIMARY_ACCENT_RE = re.compile(
     r"|<PrimaryButton\b"
     r"|\.setProperty\(\s*[\"']primary[\"']\s*,\s*True\s*\)"
 )
+# Vue/Element/Naive/Ant kits: <v-btn color="primary">, <el-button type="primary">, <a-button type="primary">
+VUE_KIT_PRIMARY_RE = re.compile(r"""<(?:v-btn|el-button|n-button|a-button|q-btn)\b[^>]*\b(?:color|type)\s*=\s*["']primary["']""")
 PRIMARY_FILL_BODY_RE = re.compile(PRIMARY_ACCENT_RE.pattern + r"|\b\w+\.on_primary\s*\(")
 KIT_HELPER_FILE_RE = re.compile(r"(?i)(?:^|/)(?:kit|visual|components|widgets|controls|theme)(?:/|\.)")
 QUALIFIED_SEGMENTED_RE = re.compile(r"\b(?:kit|visual|ui)::(segmented\w*)\s*\(")
@@ -148,7 +151,11 @@ TW_DOT_H_RE = re.compile(r"\bh-(?:1\.5|2|2\.5)\b")
 TW_DOT_W_RE = re.compile(r"\bw-(?:1\.5|2|2\.5)\b")
 TW_DOT_SIZE_RE = re.compile(r"\bsize-(?:1\.5|2|2\.5)\b")
 TW_DOT_ANIM_RE = re.compile(r"\banimate-(?:pulse|ping)\b")
-TW_DOT_LOADING_RE = re.compile(r"(?i)\b(?:loading|isLoading|spinner|skeleton|progress|fetching|syncing|busy|pending)\b")
+TW_DOT_LOADING_RE = re.compile(
+    r"(?i)\b(?:loading|isLoading|spinner|skeleton|progress|fetching|syncing|busy|pending|typing|isTyping|recording|"
+    r"isRecording|rec|streaming|connecting|uploading|transcrib\w*|listening|capturing)\b"
+    r"|\brole=[\"']status[\"']|\baria-live=|animation-delay|\bdelay-\d+"
+)
 
 # Intra-screen consistency extractors (full audit only).
 CONSIST_TW_RADIUS_RE = re.compile(
@@ -158,7 +165,25 @@ CONSIST_RS_RADIUS_RE = re.compile(r"\.rounded\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*
 CONSIST_TW_FONT_RE = re.compile(r"(?<![\w-])text-(xs|sm|base|lg|xl|[2-6]xl|\[(?:\d+(?:\.\d+)?)(?:px|rem)\])(?![\w-])")
 CONSIST_RS_FONT_RE = re.compile(r"\.text_size\(\s*px\(\s*([^)]+)\s*\)\s*\)|\.text_(xs|sm|base|lg|xl|2xl)\(\)")
 CONSIST_CARD_TW_PAD_RE = re.compile(r"(?<![\w-])p(?:[xy])?-(?:(\d+(?:\.5)?)|\[(\d+(?:\.\d+)?)(px|rem)\])(?![\w.\]-])")
-CONSIST_CARD_RS_PAD_RE = re.compile(r"\.(?:p|px|py)\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)|\.(?:p|px|py)_(\d+)(p5)?\(\)")
+# Tailwind card-like surface: rounded corners plus a border, fill or shadow (shadcn-style `rounded-lg border p-4`).
+TW_CARD_LIKE_RE = re.compile(
+    r"<(?:div|section|article|li|aside)\b[^>]*\brounded(?:-[\w\[\].]+)?\b[^>]*"
+    r"(?:\bborder(?!-(?:0|none|transparent)\b)|\bbg-(?!transparent\b)|\bshadow\b|\bshadow-(?!none\b))"
+    r"|<(?:div|section|article|li|aside)\b[^>]*(?:\bborder(?!-(?:0|none|transparent)\b)|\bbg-(?!transparent\b)|\bshadow\b|\bshadow-(?!none\b))"
+    r"[^>]*\brounded(?:-[\w\[\].]+)?\b"
+)
+# KPI stat value: an element in a large display size whose only content is a number or a single {expression}.
+KPI_VALUE_RE = re.compile(
+    r"<(\w+)\b[^>]*\btext-(?:2xl|3xl|4xl|5xl|6xl)\b[^>]*>\s*"
+    r"(?:[$€£¥]|R\$)?\s*(?:\d[\d.,]*\s*[%kKmMbB]?|\{\s*[\"'`]?[$€£¥]?\d[\d.,]*\s*[%kKmMbB]?[\"'`]?\s*\}"
+    r"|\{(?!\s*[\"'`])[^{}<>]*(?:toLocaleString|toFixed|format\w*|Intl\.NumberFormat|"
+    r"(?i:count|total|value|amount|sum|avg|average|rate|pct|percent|revenue|users|qty|num|kpi|stat|delta|metric|mrr|arr|unread|views|clicks|visits|orders|sales|signups|score|balance|spent|budget|growth|churn)\w*)"
+    r"[^{}<>]*\})\s*</\1>"
+)
+KPI_NON_METRIC_TAG_RE = re.compile(r"^<(?:a|h[1-6]|Link)\b")
+KPI_PRICE_PERIOD_RE = re.compile(r"(?i)/\s*(?:mo|month|yr|year|user|seat)\b|\bper\s+(?:month|year|user|seat)\b")
+KPI_LABEL_RE = re.compile(r"\btext-(?:xs|sm|\[1[0-4]px\])\b|\b(?:uppercase|tracking-wide|text-muted)")
+CONSIST_CARD_RS_PAD_RE =re.compile(r"\.(?:p|px|py)\(\s*px\(\s*(\d+(?:\.\d*)?)\s*\)\s*\)|\.(?:p|px|py)_(\d+)(p5)?\(\)")
 
 # Patterns for hardcoded styling literals.
 CSS_FIX = "use CSS custom property or theme token"
@@ -301,16 +326,51 @@ def _scan_kit_primary_helpers(source, primary_helpers, non_primary_helpers):
             non_primary_helpers.add(name)
 
 
+WEB_BUTTON_KIT_RE = re.compile(r"(?i)(?:^|/)(?:components/)?ui/button\.(?:tsx|jsx|ts|js|vue)$")
+CVA_VARIANT_BLOCK_RE = re.compile(r"\bvariant\s*:\s*\{")
+CVA_VARIANT_ENTRY_RE = re.compile(r"""(?m)^\s*["']?([A-Za-z][\w-]*)["']?\s*:\s*(["'`])([^"'`]*)\2""")
+CVA_DEFAULT_RE = re.compile(r"""defaultVariants\s*:\s*\{[^}]*\bvariant\s*:\s*["']([\w-]+)["']""")
+JSX_BUTTON_RE = re.compile(r"<Button\b([^>]*)>")
+
+
+def _scan_web_button_variants(source):
+    """shadcn-style `components/ui/button`: the cva() variants painted with a solid bg-primary, as
+    `<Button:variant>` sentinels, plus `<Button>` when defaultVariants makes a bare <Button> primary."""
+    out = set()
+    m = CVA_VARIANT_BLOCK_RE.search(source)
+    if not m:
+        return out
+    block_end = source.find("}", m.end())
+    for em in CVA_VARIANT_ENTRY_RE.finditer(source[m.end():block_end]):
+        if re.search(r"(?<![\w:-])bg-primary(?![\w/-])", em.group(3)):
+            out.add(f"<Button:{em.group(1)}>")
+    d = CVA_DEFAULT_RE.search(source)
+    if d and f"<Button:{d.group(1)}>" in out:
+        out.add("<Button>")
+    return out
+
+
+def _is_kit_primary_button(code, primary_helpers):
+    """A <Button> whose variant (or the cva default when none is given) the button kit paints primary."""
+    for m in JSX_BUTTON_RE.finditer(code):
+        v = re.search(r"""\bvariant\s*=\s*\{?\s*["']([\w-]+)["']""", m.group(1))
+        if (f"<Button:{v.group(1)}>" if v else "<Button>") in primary_helpers:
+            return True
+    return False
+
+
 def _discover_kit_helpers(root=None):
-    """Lightweight pass over Rust kit/component files so lean hooks match CLI primary-helper detection."""
+    """Lightweight pass over Rust kit/component files (and a web ui/button kit) so lean hooks match the CLI."""
     primary_helpers, non_primary_helpers = set(), set()
-    for rel, path, suffix in _tracked_candidates(root, exts={".rs"}):
-        if KIT_HELPER_FILE_RE.search(rel):
+    for rel, path, suffix in _tracked_candidates(root, exts={".rs"} | set(WEB_EXT)):
+        if suffix == ".rs" and KIT_HELPER_FILE_RE.search(rel):
             _scan_kit_primary_helpers(
                 path.read_text(encoding="utf-8", errors="replace"),
                 primary_helpers,
                 non_primary_helpers,
             )
+        elif suffix in WEB_EXT and WEB_BUTTON_KIT_RE.search(rel):
+            primary_helpers.update(_scan_web_button_variants(path.read_text(encoding="utf-8", errors="replace")))
     return primary_helpers, non_primary_helpers
 
 
@@ -351,6 +411,8 @@ def discover_project_tokens(root=None):
             tokens["uses_tooltips"] = True
         if suffix == ".rs" and KIT_HELPER_FILE_RE.search(rel):
             _scan_kit_primary_helpers(source, tokens["primary_helpers"], tokens["non_primary_helpers"])
+        if suffix in WEB_EXT and WEB_BUTTON_KIT_RE.search(rel):
+            tokens["primary_helpers"].update(_scan_web_button_variants(source))
 
     for rel, path, suffix in prioritized:
         inspect(rel, suffix, path.read_text(encoding="utf-8", errors="replace"))
@@ -873,7 +935,9 @@ def _track_line_boxes(raw, code, suffix, delim_state, stack, in_loop, card_lines
 
 def _is_primary_accent_call(lines, number, raw, code, primary_helpers, non_primary_helpers):
     """Detects solid p.primary fills: direct primary_button/.bg/.pill, discovered kit helpers, or kit::segmented."""
-    if PRIMARY_ACCENT_RE.search(raw):
+    if PRIMARY_ACCENT_RE.search(raw) or VUE_KIT_PRIMARY_RE.search(raw):
+        return True
+    if primary_helpers and "<Button" in code and _is_kit_primary_button(raw, primary_helpers):
         return True
     for m in PRIMARY_ARG_CALL_RE.finditer(code):
         span, _ = copy_rules.call_span(lines, number, m.end(), limit=12)
@@ -909,6 +973,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
     slop_findings = []  # (line, problem, fix)
     radii, font_sizes = {}, {}
     card_paddings = []  # (depth, pad_px, line)
+    kpi_values = []  # (line, in_loop)
     flat_filter_chips = []
     loop_indent = None
     loop_bp = ()
@@ -1027,6 +1092,11 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
                     f"{name}: decorative gradient text (bg-clip-text)",
                     "use a plain theme text token and show hierarchy via weight or size",
                 ))
+            kpi_m = KPI_VALUE_RE.search(raw) if suffix in WEB_EXT else None
+            if kpi_m and not KPI_NON_METRIC_TAG_RE.match(kpi_m.group(0)):
+                label_ctx = "\n".join(lines[max(0, number - 3):min(len(lines), number + 2)])
+                if KPI_LABEL_RE.search(label_ctx) and not KPI_PRICE_PERIOD_RE.search(label_ctx):
+                    kpi_values.append((number, in_loop))
             dot_ctx = "\n".join(lines[max(0, number - 3):min(len(lines), number + 2)])
             if suffix in WEB_EXT and _is_tw_animated_dot(raw, dot_ctx):
                 slop_findings.append((
@@ -1109,6 +1179,8 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
             if pad is not None:
                 if len(card_lines) > prev_cards or number in card_lines:
                     card_paddings.append((len(stack), pad, number))
+                elif suffix in WEB_EXT and TW_CARD_LIKE_RE.search(raw):
+                    card_paddings.append((len(stack), pad, number))
                 elif suffix == ".rs" and stack and stack[-1][1] in card_lines and raw.lstrip().startswith(".") and ".child" not in raw:
                     card_paddings.append((len(stack), pad, stack[-1][1]))
 
@@ -1162,6 +1234,7 @@ def _analyze_fn(lines, suffix, start, name, end, look, skip, known_callees, prim
         "fixed_width_triggers": fixed_width_triggers,
         "slop_findings": slop_findings,
         "radii": radii, "font_sizes": font_sizes, "card_paddings": card_paddings,
+        "kpi_values": kpi_values,
         "gap_calls": gap_calls, "header_runs": header_runs,
         "inline_chains": inline_chains, "calls": calls,
         "touched": any(look(n) for n in range(start, end + 1)),
@@ -1238,6 +1311,15 @@ def _emit_fn_findings(rel, stats, uses_tooltips, look, out, is_modal_file=False,
         if look(line_no) and prob not in seen_slop:
             seen_slop.add(prob)
             out.append(core.Finding(rel, line_no, "design", prob, fix))
+    kpis = stats.get("kpi_values", [])
+    kpi_lines = [ln for ln, _ in kpis]
+    if (len(kpis) >= 3 or any(in_loop for _, in_loop in kpis)) and any(look(ln) for ln in kpi_lines):
+        n_desc = f"{len(kpis)} metric cards" if not any(in_loop for _, in_loop in kpis) else "a mapped row of metric cards"
+        out.append(core.Finding(
+            rel, kpi_lines[0], "design",
+            f"{name}: KPI stat strip ({n_desc}: small label + large number)",
+            "keep a metric strip only on a dashboard the user asked for; otherwise show the one number the workflow needs inline, or drop the strip",
+        ))
     if stats["gap_calls"] > 0 and len(stats["spacers"]) >= 2 and any(look(n) for n in stats["spacers"]):
         out.append(core.Finding(
             rel, stats["spacers"][0], "design",
@@ -1860,7 +1942,7 @@ _LEAN_BOX_TAG = re.compile(
 _LEAN_LIST_ITEM = re.compile(r"\.(?:map|flatMap)\(|\bv-for=|\{#each\b")
 _LEAN_CARD_CLASS = re.compile(r"\b(?:border(?!-(?:0|none|transparent)\b)|shadow(?:-\w+)?|card|ring)\b")
 _LEAN_BADGE_OPEN = re.compile(
-    r"<(?:Badge|Chip|Tag|Pill)\b|\b(?:badge|chip|tag|pill|status_pill)\s*\("
+    r"<(?:Badge|Chip|Tag|Pill)\b|<(?:v|el|n|a|q|b)-(?:chip|tag|badge)\b|\b(?:badge|chip|tag|pill|status_pill)\s*\("
 )
 _LEAN_HYPE = re.compile(
     r"(?i)^\W*(?:new|novo|nova|beta|alpha|pro|ai|ia|hot|popular|recommended|recomendad[oa]|smart|"
@@ -2022,6 +2104,245 @@ def _lean_gpui_status_dots(rel, lines, suffix, look, skip, test_from, out):
         ))
 
 
+# --- composed-class, CSS rule-block, GPUI chain, StatCard and per-row badge pass ---------------
+CLASS_CALL_START_RE = re.compile(r"\b(?:cn|clsx|cva|cx|tv|twMerge|classNames|classnames)\s*\(")
+CLASS_CONST_RE = re.compile(r"""^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*(["'`])([^"'`]*)\1""")
+STR_LIT_RE = re.compile(r"""(["'`])((?:(?!\1)[^\\]|\\.)*)\1""")
+SFC_STYLE_OPEN_RE = re.compile(r"<style\b[^>]*>", re.I)
+SFC_STYLE_CLOSE_RE = re.compile(r"</style>", re.I)
+CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+CSS_GRADIENT_RE = re.compile(r"\b(?:linear|radial|conic)-gradient\(")
+CSS_BACKDROP_BLUR_RE = re.compile(r"(?:^|[\s;])(?:-webkit-)?backdrop-filter\s*:\s*[^;]*\bblur\(")
+CSS_BOX_SHADOW_RE = re.compile(r"\bbox-shadow\s*:\s*([^;]+)")
+CSS_LENGTH_RE = re.compile(r"(?<![\w-])(-?\d*\.?\d+)(px|rem|em)?(?![\w%])")
+CSS_CLIP_TEXT_RE = re.compile(r"(?:^|[\s;])(?:-webkit-)?background-clip\s*:\s*text\b")
+CSS_TRANSPARENT_TEXT_RE = re.compile(r"(?:-webkit-text-fill-color|(?:^|[\s;])color)\s*:\s*transparent\b")
+CSS_BG_ALPHA_RE = re.compile(r"(?:^|[\s;])background(?:-color)?\s*:\s*(?:rgba|hsla)\([^)]*,\s*(0?\.\d+)\s*\)")
+CSS_PULSE_ANIM_RE = re.compile(r"(?i)\banimation(?:-name)?\s*:\s*[^;]*\b(?:pulse|ping|blink|glow)\w*")
+CSS_ROUND_RE = re.compile(r"\bborder-radius\s*:\s*(?:50%|100%|9{3,}px|var\(--radius-(?:full|round)\))")
+CSS_DOT_SEL_RE = re.compile(r"(?i)(?:^|[.\-_])(?:dot|indicator|pulse|blip)(?:$|[\-_])")
+CSS_BG_DECL_RE = re.compile(r"(?:^|[\s;])background(?:-color)?\s*:")
+CSS_BORDER_DECL_RE = re.compile(r"(?:^|[\s;])border\s*:\s*(?!0\b|none\b)")
+CSS_RADIUS_DECL_RE = re.compile(r"(?:^|[\s;])border-radius\s*:")
+GPUI_GRADIENT_RE = re.compile(r"\b(?:linear_gradient|radial_gradient)\s*\(")
+GPUI_HEAVY_SHADOW_RE = re.compile(r"\.shadow_(?:xl|2xl)\s*\(\s*\)")
+STAT_CARD_RE = re.compile(r"<((?:[A-Z]\w*)?(?:Stat|Metric|Kpi|KPI)\w*)\b[^>]*\bvalue=")
+SLOP_SURFACE_FIX = "use plain theme surface and border tokens instead of decorative gradients, blur, or heavy glow"
+SLOP_GRAD_TEXT_FIX = "use a plain theme text token and show hierarchy via weight or size"
+SLOP_DOT_FIX = "colour only the status word with a semantic token; keep pulse animations for real loading states"
+
+
+def _class_bag_spans(lines):
+    """Yields (start_line, end_line, bag) for class strings composed across a statement:
+    multi-line cn()/clsx()/cva()/twMerge() calls and `const x = "..."` class constants
+    (in a function or at module scope)."""
+    number, limit = 1, len(lines)
+    while number <= limit:
+        line = lines[number - 1]
+        cm = CLASS_CALL_START_RE.search(line)
+        if cm:
+            depth, end, parts = 0, number, []
+            for k in range(number, min(limit, number + 40) + 1):
+                seg = lines[k - 1][cm.start():] if k == number else lines[k - 1]
+                parts.append(seg)
+                depth += seg.count("(") - seg.count(")")
+                end = k
+                if depth <= 0:
+                    break
+            text = "\n".join(parts)
+            bag = " ".join(m.group(2) for m in STR_LIT_RE.finditer(text))
+            yield number, end, bag
+            number = end + 1
+            continue
+        km = CLASS_CONST_RE.match(line)
+        if km:
+            yield number, number, km.group(2)
+        number += 1
+
+
+def _css_rule_blocks(raw_lines, suffix):
+    """Yields (line, selector, body) for plain CSS rule blocks of a stylesheet or of SFC <style> blocks."""
+    chunks = []
+    if suffix in STYLE_EXT:
+        chunks.append((1, "\n".join(raw_lines)))
+    elif suffix in MARKUP_EXT:
+        start = None
+        for number, line in enumerate(raw_lines, 1):
+            if start is None:
+                om = SFC_STYLE_OPEN_RE.search(line)
+                if om:
+                    start = number
+                    buf = [line[om.end():]]
+                    if SFC_STYLE_CLOSE_RE.search(buf[0]):
+                        chunks.append((number, SFC_STYLE_CLOSE_RE.split(buf[0])[0]))
+                        start = None
+            elif SFC_STYLE_CLOSE_RE.search(line):
+                buf.append(SFC_STYLE_CLOSE_RE.split(line)[0])
+                chunks.append((start, "\n".join(buf)))
+                start = None
+            else:
+                buf.append(line)
+    for base, text in chunks:
+        text = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
+        for m in CSS_RULE_RE.finditer(text):
+            selector = m.group(1).strip()
+            if not selector or selector.startswith("@"):
+                continue
+            sel_off = m.start(1) + (len(m.group(1)) - len(m.group(1).lstrip()))
+            yield base + text.count("\n", 0, sel_off), selector, m.group(2)
+
+
+def _css_max_shadow_blur(body):
+    best = 0.0
+    for sm in CSS_BOX_SHADOW_RE.finditer(body):
+        value = re.sub(r"\([^()]*\)", " ", sm.group(1))
+        for layer in value.split(","):
+            if "inset" in layer:
+                continue
+            nums = CSS_LENGTH_RE.findall(layer)
+            if len(nums) >= 3:
+                size, unit = float(nums[2][0]), nums[2][1]
+                best = max(best, size * 16 if unit in ("rem", "em") else size)
+    return best
+
+
+def _css_bem_block(selector):
+    first = re.search(r"\.([A-Za-z][\w-]*)", selector)
+    if not first:
+        return None
+    return re.split(r"__|--", first.group(1))[0]
+
+
+def _composed_slop_pass(rel, raw_lines, suffix, look, skip, test_from, is_modal_file, out, full=False):
+    """Slop cues that the per-line detectors cannot see: classes composed across a cn()/cva()
+    statement or hoisted into a module-scope constant, CSS/SFC <style> rule blocks, GPUI element
+    chains, and (full audits only) <StatCard value=...> strips and badge soup inside one list row."""
+    fallback = Path(rel).stem.replace(".module", "")
+    seen = {(f.line, f.problem.split(": ", 1)[-1].split(" (")[0]) for f in out if f.path == rel}
+    seen_probs = {f.problem for f in out if f.path == rel}
+
+    def emit(number, owner, msg, fix):
+        key = (number, msg.split(" (")[0])
+        prob = f"{owner}: {msg}"
+        if key in seen or prob in seen_probs or not look(number):
+            return
+        seen.add(key)
+        seen_probs.add(prob)
+        out.append(core.Finding(rel, number, "design", prob, fix))
+
+    if suffix in WEB_EXT:
+        norm = normalize_jsx_tags(raw_lines)
+        for start, end, bag in _class_bag_spans(norm):
+            if start in skip or not bag.strip():
+                continue
+            owner = _lean_owner(norm, start, fallback)[1]
+            fn_modal = is_modal_file or bool(MODAL_CALLEE_RE.search(owner))
+            msg = _slop_surface_cue(bag, fn_modal)
+            if msg:
+                emit(start, owner, msg, SLOP_SURFACE_FIX)
+            if SLOP_GRAD_CLIP_RE.search(bag) and SLOP_GRAD_TRANS_RE.search(bag):
+                emit(start, owner, "decorative gradient text (bg-clip-text)", SLOP_GRAD_TEXT_FIX)
+            ctx = "\n".join(norm[max(0, start - 3):min(len(norm), end + 2)])
+            if _is_tw_animated_dot(bag, ctx):
+                emit(start, owner, "decorative pulsing status dot", SLOP_DOT_FIX)
+
+    if suffix in STYLE_EXT or suffix in MARKUP_EXT:
+        owner = fallback
+        groups = defaultdict(list)
+        surfaces = defaultdict(list)
+        for number, selector, body in _css_rule_blocks(raw_lines, suffix):
+            if number in skip:
+                continue
+            grad = bool(CSS_GRADIENT_RE.search(body))
+            blur = bool(CSS_BACKDROP_BLUR_RE.search(body))
+            glow = _css_max_shadow_blur(body) >= 24
+            alpha = CSS_BG_ALPHA_RE.search(body)
+            frost = bool(alpha) and float(alpha.group(1)) <= 0.3
+            modal = is_modal_file or bool(SLOP_MODAL_CONTEXT_RE.search(selector)) or bool(
+                re.search(r"(?i)modal|dialog|overlay|backdrop|sheet|drawer|popover", selector))
+            if not modal and ((grad and (blur or glow)) or (blur and (frost or glow))):
+                emit(number, owner, f"decorative gradient/glassmorphism surface (CSS {selector})", SLOP_SURFACE_FIX)
+            if CSS_CLIP_TEXT_RE.search(body) and CSS_TRANSPARENT_TEXT_RE.search(body):
+                emit(number, owner, f"decorative gradient text (CSS {selector})", SLOP_GRAD_TEXT_FIX)
+            block = _css_bem_block(selector)
+            if block:
+                groups[block].append((number, selector, body))
+                if CSS_BG_DECL_RE.search(body) and CSS_BORDER_DECL_RE.search(body) and CSS_RADIUS_DECL_RE.search(body):
+                    surfaces[block].append(number)
+        for block, rules in groups.items():
+            sels = " ".join(r[1] for r in rules)
+            body = " ".join(r[2] for r in rules)
+            anim = next((r for r in rules if CSS_PULSE_ANIM_RE.search(r[2])), None)
+            if anim and (CSS_ROUND_RE.search(body) or CSS_DOT_SEL_RE.search(block)) and not TW_DOT_LOADING_RE.search(sels):
+                emit(anim[0], owner, f"decorative pulsing status dot (CSS .{block})", SLOP_DOT_FIX)
+        for block, found in surfaces.items():
+            if len(found) >= 3:
+                emit(found[0], owner,
+                     f"{len(found)} boxed surfaces nested in one component (CSS .{block}: background + border + radius each)",
+                     "keep one box; separate the inner groups with spacing and a heading, not another border")
+
+    if suffix == ".rs":
+        limit = (test_from - 1) if test_from else len(raw_lines)
+        for number in range(1, limit + 1):
+            line = raw_lines[number - 1]
+            if number in skip or not GPUI_GRADIENT_RE.search(line) or core.comment_of(line, suffix) is not None:
+                continue
+            indent = len(line) - len(line.lstrip())
+            chain = [line]
+            for step in (-1, 1):
+                k = number + step
+                while 1 <= k <= limit:
+                    other = raw_lines[k - 1]
+                    o_indent = len(other) - len(other.lstrip())
+                    if other.strip() and o_indent < indent:
+                        break
+                    if other.strip() and o_indent == indent and not other.lstrip().startswith((".", ")")):
+                        break
+                    if o_indent == indent:
+                        chain.append(other)
+                    k += step
+            if any(GPUI_HEAVY_SHADOW_RE.search(c) for c in chain):
+                owner = _lean_owner(raw_lines, number, fallback)[1]
+                emit(number, owner, "decorative gradient/glassmorphism surface (gradient fill + heavy shadow)", SLOP_SURFACE_FIX)
+
+    if not full or suffix not in WEB_EXT:
+        return
+    norm = normalize_jsx_tags(raw_lines)
+    lines = core.jsx_lines(norm, normalized=True) if suffix in JSX_LIKE else norm
+    stat_cards = defaultdict(list)
+    covered = set()
+    for number, line in enumerate(lines, 1):
+        if number in skip:
+            continue
+        if STAT_CARD_RE.search(line):
+            owner = _lean_owner(lines, number, fallback)
+            in_loop = any(LOOP_START_RE.search(lines[k - 1]) for k in range(max(1, number - 3), number))
+            stat_cards[owner].append((number, in_loop))
+        if number in covered or not LOOP_START_RE.search(line):
+            continue
+        indent = len(line) - len(line.lstrip())
+        badges = []
+        for k in range(number, min(len(lines), number + 60) + 1):
+            row = lines[k - 1]
+            if k > number and row.strip() and len(row) - len(row.lstrip()) <= indent:
+                break
+            covered.add(k)
+            badges += [k] * len(_LEAN_BADGE_OPEN.findall(row))
+        if len(badges) >= 3:
+            owner = _lean_owner(lines, number, fallback)[1]
+            uniq = sorted(set(badges))
+            emit(badges[0], owner,
+                 f"{len(badges)} badges per list row (lines {', '.join(map(str, uniq[:5]))})",
+                 "keep one status badge per row; show the other fields as plain muted text or in the detail view")
+    for owner, cards in stat_cards.items():
+        if len(cards) >= 3 or any(loop for _, loop in cards):
+            if any(f.problem.startswith(f"{owner[1]}: KPI stat strip") for f in out if f.path == rel):
+                continue
+            desc = "a mapped row of metric cards" if any(loop for _, loop in cards) else f"{len(cards)} metric cards"
+            emit(cards[0][0], owner[1], f"KPI stat strip ({desc} <{STAT_CARD_RE.search(lines[cards[0][0] - 1]).group(1)} value=...>)",
+                 "keep a metric strip only on a dashboard the user asked for; otherwise show the one number the workflow needs inline, or drop the strip")
+
+
 def scan_lean_design(path, rel, text, repo, only=None):
     """Single canonical owner of lean [design] layout/chrome/AI-slop rules for hunt.py / stop_gate.py:
     nested cards/styled boxes, decorative/slop badges & pills, GPUI/Tailwind status dots, and
@@ -2086,6 +2407,7 @@ def scan_lean_design(path, rel, text, repo, only=None):
                         rel, number, "design", prob,
                         "colour only the status word with a semantic token; keep pulse animations for real loading states",
                     ))
+    _composed_slop_pass(rel, raw_lines, suffix, base_look, skip, test_from, is_modal_file, out)
     return out
 
 
@@ -2125,6 +2447,11 @@ def raw_scan_file(path, only=None, tokens=None, checks=None, cache=None, include
         _audit_file_design(
             rel, path, lines, source, suffix, test_from, look, skip, tokens, out,
             cache=cache, include_consistency=include_consistency,
+        )
+    if "design" in wanted and not is_theme_file(rel, source):
+        _composed_slop_pass(
+            rel, raw_lines, suffix, base_look, skip, test_from,
+            bool(MODAL_CALLEE_RE.search(rel)), out, full=True,
         )
     if "style" in wanted:
         _style_checks(rel, raw_lines, suffix, base_look, skip, test_from, tokens, out, source=source)
@@ -2310,6 +2637,48 @@ def selftest():
         if lopsided_tw != [4, 8, 9] or not any("off-scale spacing 26px" in f.problem and f.line == 10 for f in spaced_tw):
             problems.append("spacing_cards.tsx expected lopsided on lines 4, 8, 9 and 26px off-scale on 10:\n"
                             + "\n".join(str(f) for f in spaced_tw))
+        # KPI stat strips (literal and mapped) and sibling cards with uneven padding (shadcn-style, no bg-).
+        kpi_dirty = "\n".join(str(f) for f in scan_file(
+            repo / "src" / "screens" / "kpi_dirty.tsx", only=None, tokens=tokens, checks={"design"}))
+        for needed in (
+            "OrdersScreen: KPI stat strip (3 metric cards",
+            "OrdersScreen: inconsistent padding across sibling cards (8px, 16px, 24px)",
+            "TeamScreen: KPI stat strip (a mapped row of metric cards",
+        ):
+            if needed not in kpi_dirty:
+                problems.append(f"kpi_dirty.tsx missing expected finding {needed!r}:\n{kpi_dirty}")
+        # Batch 2: shadcn/Vue kit primaries, Separator/v-divider, composed cn()/cva() and hoisted class
+        # constants, CSS/SFC <style> rule blocks, GPUI gradient chains, StatCard strips, per-row badges.
+        slop_dir = repo / "src" / "screens" / "slop"
+        slop_expect = {
+            "Toolbar.tsx": ("IssueToolbar: 3 competing primary accents", "IssueSidebar: 4 dividers/separators",
+                            "IssueRows: 3 badges per list row", "Overview: KPI stat strip (3 metric cards <StatCard"),
+            "Composed.tsx": ("SplitHero: decorative gradient/glassmorphism surface", "CvaDot: decorative pulsing status dot",
+                             "Composed.tsx:4 [design] Composed: decorative gradient/glassmorphism surface"),
+            "BillingVue.vue": ("BillingVue: 4 dividers/separators", "BillingVue: 2 competing primary accents",
+                               "decorative gradient/glassmorphism surface (CSS .hero)",
+                               "decorative gradient text (CSS .hero-title)", "decorative pulsing status dot (CSS .dot)",
+                               "3 boxed surfaces nested in one component (CSS .plan-card"),
+            "panel.css": ("decorative gradient/glassmorphism surface (CSS .panel)", "decorative gradient text (CSS .headline)"),
+            "welcome.rs": ("welcome_hero: decorative gradient/glassmorphism surface (gradient fill + heavy shadow)",),
+        }
+        for fname, needs in slop_expect.items():
+            got = "\n".join(str(f) for f in scan_file(slop_dir / fname, only=None, tokens=tokens, checks={"design"}))
+            for needed in needs:
+                if needed not in got:
+                    problems.append(f"slop/{fname} missing expected finding {needed!r}:\n{got}")
+        lean_composed = [str(f) for f in scan_lean_design(
+            slop_dir / "Composed.tsx", "src/screens/slop/Composed.tsx",
+            (slop_dir / "Composed.tsx").read_text(encoding="utf-8"), repo)]
+        if len(lean_composed) != len(set(f.split(" -> ")[0].split(" [design] ")[1] for f in lean_composed)):
+            problems.append(f"lean scan duplicated a composed slop finding: {lean_composed!r}")
+        for fname in ("Clean.tsx", "clean.css"):
+            fp = [str(f) for f in scan_file(slop_dir / fname, only=None, tokens=tokens, checks={"design"})]
+            if fp:
+                problems.append(f"slop/{fname} reported false positive(s): {fp!r}")
+        kpi_clean = scan_file(repo / "src" / "screens" / "kpi_clean.tsx", only=None, tokens=tokens, checks=CHECKS)
+        if kpi_clean:
+            problems.append(f"kpi_clean.tsx reported false positive(s): {[str(f) for f in kpi_clean]!r}")
         spaced_qt = "\n".join(str(f) for f in scan_file(
             repo / "src" / "screens" / "spacing_qt.py", only=None, tokens=tokens, checks={"spacing"}))
         for needed in ("build_panel: lopsided margins: 24px above, 6px below", "build_panel: off-scale spacing 26px"):
